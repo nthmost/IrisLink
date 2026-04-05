@@ -14,9 +14,60 @@ Once both sides connect, every message is mediated by Claude: outbound text is o
 
 ## Components
 
-1. **IrisLink skill** (`irislink/SKILL.md`) — handles `/irislink` commands, validates codes, joins/leaves rooms, and orchestrates Claude-to-Claude relays.
-2. **Lobby page** (future `/web/` directory) — minimal UI for copying/pasting the 6-character code, toggling mediation modes, and showing connection state.
-3. **Connector script** (future `/connectors/`) — local helper that exposes Claude Code's API tunnel to the lobby page via WebSocket/SSE so Claude can intercept and transform every message.
+1. **IrisLink skill** (`irislink/irislink.md`) — handles `/irislink` commands, validates codes, joins/leaves rooms, and orchestrates Claude-to-Claude relays.
+2. **Connector** (`connectors/claude_proxy.py`) — FastAPI proxy on `localhost:8357` that bridges the skill to the rendezvous API.
+3. **Rendezvous server** (`server/main.py`) — FastAPI service that manages rooms, participants, and messages.
+4. **Helper utilities** (`connectors/irislink_helpers.py`) — CLI tools for OTP generation, HKDF derivation, file I/O, and LiteLLM-backed mediation.
+
+## Quick Start
+
+### 1. Install dependencies
+
+```bash
+cd server && pip install -r requirements.txt
+cd ../connectors && pip install -r requirements.txt
+```
+
+### 2. Start the rendezvous server
+
+```bash
+cd server
+uvicorn main:app --port 4173
+```
+
+### 3. Start the connector (one per Claude session)
+
+```bash
+python connectors/claude_proxy.py
+# defaults to localhost:8357; IRISLINK_BASE_URL defaults to http://localhost:4173
+```
+
+### 4. Install the skill
+
+Copy or symlink the skill into your Claude Code skills directory:
+
+```bash
+cp irislink/irislink.md ~/.claude/skills/irislink.md
+```
+
+### 5. Use it
+
+**Person A** (in their Claude session):
+```
+/irislink create
+```
+Claude displays a 6-character code. Share it with Person B out-of-band.
+
+**Person B** (in their Claude session):
+```
+/irislink join ABC123
+```
+
+Once both sides are connected, use `/irislink send <text>` to exchange messages. Claude mediates according to the active mode (`relay`, `mediate`, or `game-master`).
+
+```
+/irislink leave    # close the room and clean up
+```
 
 ## Skill Roadmap
 
