@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"strings"
 
 	"golang.org/x/crypto/hkdf"
 )
@@ -27,7 +28,7 @@ func GenerateOTP() (string, error) {
 // DeriveRoomID returns a 32-char lowercase hex string from HKDF-SHA256(otp).
 // Matches the Python implementation: salt="irislink:v0", info="irislink-room", 16 bytes.
 func DeriveRoomID(otp string) (string, error) {
-	r := hkdf.New(sha256.New, []byte(otp), []byte("irislink:v0"), []byte("irislink-room"))
+	r := hkdf.New(sha256.New, []byte(strings.ToUpper(otp)), []byte("irislink:v0"), []byte("irislink-room"))
 	buf := make([]byte, 16)
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return "", err
