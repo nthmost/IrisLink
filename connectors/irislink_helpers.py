@@ -165,7 +165,10 @@ def main() -> None:
     command = args[0]
 
     try:
-        if command == "generate_otp":
+        if command == "get_connector_url":
+            print(get_connector_url())
+
+        elif command == "generate_otp":
             print(generate_otp())
 
         elif command == "derive_room_id":
