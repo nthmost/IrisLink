@@ -36,6 +36,61 @@ All state lives under `~/.irislink/rooms/`:
 | `<otp>.pid` | PID of the background polling loop |
 | `<otp>.meta` | `{"handle": "...", "mode": "relay", "cursor": 0}` — local session metadata |
 
+## Seamless Relay Mode (UserPromptSubmit Hook)
+
+Once a session is active, the `irislink_hook.py` script is registered as a `UserPromptSubmit` hook. This means the user can type messages naturally without any `/irislink` prefix — Claude will automatically relay each message and surface inbound messages before responding.
+
+**Register the hook on create/join** by adding to `~/.claude/settings.json`:
+
+```bash
+python3 - << 'EOF'
+import json, pathlib
+
+settings_path = pathlib.Path.home() / ".claude" / "settings.json"
+settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+
+hook = {
+    "hooks": {
+        "UserPromptSubmit": [
+            {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "python SKILL_DIR/connectors/irislink_hook.py"
+                    }
+                ]
+            }
+        ]
+    }
+}
+
+# Merge hooks
+existing_hooks = settings.get("hooks", {})
+existing_ups = existing_hooks.get("UserPromptSubmit", [])
+new_entry = hook["hooks"]["UserPromptSubmit"][0]
+if not any(h.get("hooks", [{}])[0].get("command", "").endswith("irislink_hook.py") for h in existing_ups):
+    existing_ups.append(new_entry)
+existing_hooks["UserPromptSubmit"] = existing_ups
+settings["hooks"] = existing_hooks
+
+settings_path.write_text(json.dumps(settings, indent=2))
+print("Hook registered.")
+EOF
+```
+
+Replace `SKILL_DIR` with the absolute path to the IrisLink repo root.
+
+**Remove the hook on leave** by running the inverse (filter out the irislink_hook.py entry from UserPromptSubmit hooks).
+
+When the hook is active, every user message automatically:
+1. Checks for an active IrisLink session
+2. Relays the message to the room
+3. Surfaces any new inbound messages
+4. Then lets Claude respond normally
+
+Explicit `/irislink` commands pass through the hook unchanged.
+
 ## Subcommands
 
 ---
@@ -108,7 +163,9 @@ Default mode is `relay`. Valid modes: `relay`, `mediate`, `game-master`.
 
 7. Start the background polling loop (see **Polling Loop** below).
 
-8. Tell the user: "Waiting for your partner to run `/irislink join <OTP>`. I'll show incoming messages as they arrive."
+8. Register the UserPromptSubmit hook (see **Seamless Relay Mode** above) so the user can type messages without `/irislink` prefix.
+
+9. Tell the user: "Waiting for your partner to run `/irislink join <OTP>`. Once connected, just type your messages normally — no `/irislink` prefix needed."
 
 ---
 
@@ -146,7 +203,9 @@ Default mode is `relay`.
 
 7. Start the background polling loop (see **Polling Loop** below).
 
-8. Tell the user: "Joined room <OTP>. Messages from your partner will appear here. Use `/irislink send <text>` to reply."
+8. Register the UserPromptSubmit hook (see **Seamless Relay Mode** above).
+
+9. Tell the user: "Joined room <OTP>. Just type your messages normally — they'll be relayed automatically. Use `/irislink leave` when done."
 
 ---
 
@@ -245,7 +304,23 @@ Requires an active room.
    ```
    Keep `<OTP>.log` as session history.
 
-5. Confirm: "Left room <OTP>. Session log saved at ~/.irislink/rooms/<OTP>.log"
+5. Deregister the UserPromptSubmit hook:
+   ```bash
+   python3 - << 'EOF'
+   import json, pathlib
+   p = pathlib.Path.home() / ".claude" / "settings.json"
+   s = json.loads(p.read_text())
+   ups = s.get("hooks", {}).get("UserPromptSubmit", [])
+   s["hooks"]["UserPromptSubmit"] = [
+       h for h in ups
+       if not any("irislink_hook.py" in e.get("command", "") for e in h.get("hooks", []))
+   ]
+   p.write_text(json.dumps(s, indent=2))
+   print("Hook removed.")
+   EOF
+   ```
+
+6. Confirm: "Left room <OTP>. Session log saved at ~/.irislink/rooms/<OTP>.log"
 
 ---
 
