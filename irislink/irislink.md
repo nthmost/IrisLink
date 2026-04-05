@@ -31,10 +31,18 @@ All state lives under `~/.irislink/rooms/`:
 
 | File | Contents |
 |------|----------|
+| `config.json` | `{"connector_url": "http://localhost:8357"}` — optional, overrides default connector port |
 | `pending.json` | `{"otp": "ABC123", "room_id": "1f2e..."}` — written on create/join, deleted on leave |
 | `<otp>.log` | Incoming messages, one line per entry |
 | `<otp>.pid` | PID of the background polling loop |
 | `<otp>.meta` | `{"handle": "...", "mode": "relay", "cursor": 0}` — local session metadata |
+
+`config.json` is read by the helpers and hook automatically. To use a non-default connector port (e.g. when two sessions share a machine), write it before starting:
+
+```bash
+mkdir -p ~/.irislink
+echo '{"connector_url": "http://localhost:8358"}' > ~/.irislink/config.json
+```
 
 ## Seamless Relay Mode (UserPromptSubmit Hook)
 

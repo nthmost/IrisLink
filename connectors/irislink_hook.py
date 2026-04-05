@@ -17,7 +17,15 @@ import sys
 from pathlib import Path
 
 PENDING_PATH = Path.home() / ".irislink" / "rooms" / "pending.json"
-CONNECTOR_URL = "http://localhost:8357"
+CONFIG_PATH = Path.home() / ".irislink" / "config.json"
+
+
+def get_connector_url() -> str:
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text())
+        return cfg.get("connector_url", "http://localhost:8357")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return "http://localhost:8357"
 
 
 def read_pending() -> dict | None:
@@ -48,6 +56,8 @@ def main():
     if not otp:
         sys.exit(0)
 
+    connector_url = get_connector_url()
+
     # Read session metadata for handle and mode
     meta_path = Path.home() / ".irislink" / "rooms" / f"{otp}.meta"
     try:
@@ -75,7 +85,7 @@ def main():
 OTP: {otp}
 Your handle: {handle}
 Mode: {mode}
-Connector: {CONNECTOR_URL}
+Connector: {connector_url}
 
 **The user's message should be relayed to the IrisLink room.**
 
@@ -85,9 +95,9 @@ Steps to take before your normal response:
    Show the mediated version and ask the user to confirm before sending.
    For `relay` mode, skip this step.
 2. Send the message:
-   `python connectors/irislink_helpers.py post_message {CONNECTOR_URL} {otp} {handle} "<text to send>"`
+   `python connectors/irislink_helpers.py post_message {connector_url} {otp} {handle} "<text to send>"`
 3. Check for new inbound messages:
-   `curl -s "{CONNECTOR_URL}/events?room_otp={otp}&since={cursor}"`
+   `curl -s "{connector_url}/events?room_otp={otp}&since={cursor}"`
    Display any new messages from the partner before your response.
 
 Recent inbound messages (from log):

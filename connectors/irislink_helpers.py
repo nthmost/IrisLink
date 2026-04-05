@@ -13,6 +13,15 @@ import sys
 CROCKFORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 IRISLINK_DIR = os.path.expanduser("~/.irislink/rooms")
 LITELLM_BASE_URL = "http://spartacus.local:4000/v1"
+_CONFIG_PATH = os.path.expanduser("~/.irislink/config.json")
+
+
+def get_connector_url() -> str:
+    try:
+        with open(_CONFIG_PATH) as f:
+            return json.load(f).get("connector_url", "http://localhost:8357")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return "http://localhost:8357"
 
 
 # ---------------------------------------------------------------------------
