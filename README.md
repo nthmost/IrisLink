@@ -1,133 +1,208 @@
 # IrisLink
 
-Claude skill + shared lobby experience for pairing two Claude Code sessions via a six-character one-time pad.
+Pair two Claude Code sessions with a six-character code. Once connected, messages flow between them through Claude — optionally rewritten, mediated, or narrated by a game-master persona.
 
-## Concept
+```
+Person A                          Person B
+────────                          ────────
+/irislink create                  /irislink join K7NP3Q
+→ code: K7NP3Q   ── share ──→
 
-IrisLink lets two people point their local Claude Code instances at the same lightweight web lobby and type a matching six-character code ("one-time pad"). The code seeds a shared secret that:
+hey, can you look at this diff?   [relay]  hey, can you look at this diff?
+                                  sure, let me check...
+[relay]  sure, let me check...
+```
 
-- Establishes a transient room in a rendezvous endpoint (HTTPS + WebSocket fallback).
-- Derives symmetric encryption keys for browser ↔ Claude Code relays.
-- Gives the IrisLink skill an ID it can watch for inside each Claude session.
+## How it works
 
-Once both sides connect, every message is mediated by Claude: outbound text is optionally reframed/summarized before being relayed, and inbound text can be filtered, translated, or role-played. The mediation style is selectable per room.
+1. Person A runs `/irislink create` → gets a 6-char OTP, a room opens on the rendezvous server.
+2. They share the code with Person B out-of-band (chat, clipboard, yell across the office).
+3. Person B runs `/irislink join <OTP>` → both sides connect, room goes `active`.
+4. A `UserPromptSubmit` hook fires on every message in each Claude session. It relays the message to the room and surfaces any inbound messages — no `/irislink` prefix required once connected.
+5. `/irislink leave` closes the room and removes the hook.
 
 ## Components
 
-1. **IrisLink skill** (`irislink/irislink.md`) — handles `/irislink` commands, validates codes, joins/leaves rooms, and orchestrates Claude-to-Claude relays.
-2. **Connector** (`connectors/claude_proxy.py`) — FastAPI proxy on `localhost:8357` that bridges the skill to the rendezvous API.
-3. **Rendezvous server** (`server/main.py`) — FastAPI service that manages rooms, participants, and messages.
-4. **Helper utilities** (`connectors/irislink_helpers.py`) — CLI tools for OTP generation, HKDF derivation, file I/O, and LiteLLM-backed mediation.
+Everything ships as a single Go binary: `irislink`.
 
-## Quick Start
+| Subcommand | What it does |
+|------------|-------------|
+| `irislink server` | Rendezvous server — manages rooms, participants, messages (port 4173) |
+| `irislink proxy` | Connector proxy — bridges the Claude skill to the rendezvous API (port 8357) |
+| `irislink otp` | Generate a random 6-char Crockford Base32 OTP |
+| `irislink room-id <otp>` | HKDF-SHA256 derive a room_id from an OTP |
+| `irislink pending write/clear/connector` | Manage `~/.irislink/rooms/pending.json` |
+| `irislink send <url> <otp> <from> <text>` | POST a message via connector |
+| `irislink events <url> <otp> [since]` | GET events with cursor |
+| `irislink mediate <mode> <text>` | Transform text via LiteLLM |
+| `irislink hook` | UserPromptSubmit hook (stdin JSON → additionalContext JSON) |
 
-### 1. Install dependencies
+The `/irislink` Claude Code skill lives at `irislink/irislink.md`. It instructs Claude how to use the binary for room lifecycle, message relay, and mediation.
 
-```bash
-cd server && pip install -r requirements.txt
-cd ../connectors && pip install -r requirements.txt
-```
+## Install
 
-### 2. Start the rendezvous server
-
-```bash
-cd server
-uvicorn main:app --port 4173
-```
-
-### 3. Start the connector (one per Claude session)
+**Build from source** (requires Go 1.21+):
 
 ```bash
-python connectors/claude_proxy.py
-# defaults to localhost:8357; IRISLINK_BASE_URL defaults to http://localhost:4173
+git clone git@github.com:nthmost/IrisLink.git
+cd IrisLink
+go build -o ~/bin/irislink ./cmd/irislink
 ```
 
-### 4. Install the skill
+Make sure `~/bin` is on your `PATH`. Add this to your shell profile if needed:
 
-Copy or symlink the skill into your Claude Code skills directory:
+```bash
+export PATH="$HOME/bin:$PATH"
+```
+
+**Install the skill:**
 
 ```bash
 cp irislink/irislink.md ~/.claude/skills/irislink.md
 ```
 
-### 5. Use it
+## Quick start — two machines
 
-**Person A** (in their Claude session):
+**Both machines:**
+
+```bash
+# Terminal 1: rendezvous server (run on one machine, both point to it)
+irislink server
+
+# Terminal 2: connector
+irislink proxy
+```
+
+**Person A's Claude session:**
+
 ```
 /irislink create
 ```
-Claude displays a 6-character code. Share it with Person B out-of-band.
 
-**Person B** (in their Claude session):
-```
-/irislink join ABC123
-```
+Claude shows a 6-char code. Share it with Person B.
 
-Once both sides are connected, use `/irislink send <text>` to exchange messages. Claude mediates according to the active mode (`relay`, `mediate`, or `game-master`).
+**Person B's Claude session:**
 
 ```
-/irislink leave    # close the room and clean up
+/irislink join <CODE>
 ```
 
-## Skill Roadmap
+Once connected, both people type messages normally. No prefix needed — the hook relays everything automatically.
 
-- MVP skill spec in `irislink/SKILL.md` — done.
-- Define OTP registry shape (`rooms/<otp>.json`) and TTL enforcement.
-- Implement `irislink bridge` mode where both Claude instances exchange structured envelopes.
-- Add optional `game-master` persona that can insert creative prompts mid-chat.
+```
+/irislink leave    # when done
+```
 
-## Repo Layout
+## Quick start — same machine (two terminal tabs)
+
+Person A uses the default connector port (8357). Person B needs a different one.
+
+**Person A:**
+```bash
+irislink server &   # shared server
+irislink proxy &    # connector on :8357
+# open Claude Code — /irislink create
+```
+
+**Person B:**
+```bash
+# Set a different connector port
+mkdir -p ~/.irislink
+echo '{"connector_url":"http://localhost:8358"}' > ~/.irislink/config.json
+
+irislink proxy --listen 8358 &
+# open a second Claude Code window — /irislink join <CODE>
+```
+
+## Mediation modes
+
+Switch with `/irislink mode <relay|mediate|game-master>` at any time.
+
+| Mode | What Claude does |
+|------|-----------------|
+| `relay` | Pass-through. Messages arrive exactly as sent. No LLM call. |
+| `mediate` | Rewrites each outbound message to be clearer and more considerate before sending. Uses `loki/qwen-coder-14b` via LiteLLM at `spartacus.local:4000`. |
+| `game-master` | Adds a brief narrative flourish or creative prompt after each message. Uses `loki/qwen3-coder-30b`. |
+
+## State files
+
+All runtime state lives under `~/.irislink/`:
+
+```
+~/.irislink/
+├── config.json              # {"connector_url": "http://localhost:8357"}
+└── rooms/
+    ├── pending.json         # active room: {"otp": "...", "room_id": "..."}
+    ├── <otp>.meta           # {"handle": "...", "mode": "relay", "cursor": 0}
+    ├── <otp>.log            # incoming messages (kept after leave)
+    └── <otp>.pid            # background poller PID
+```
+
+`config.json` is the only file you need to create manually, and only when using a non-default connector port.
+
+## Rendezvous API
+
+The server exposes a simple REST API. All endpoints return `{"room": {...}}` on success or `{"error": "..."}` on failure.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/rooms` | Create room, returns OTP + initial state |
+| `POST` | `/rooms/:otp/join` | Join existing room |
+| `POST` | `/rooms/:otp/participants` | Update participant status |
+| `POST` | `/rooms/:otp/mode` | Switch mediation mode |
+| `POST` | `/rooms/:otp/messages` | Append message |
+| `POST` | `/rooms/:otp/messages/:id/ack` | Acknowledge message |
+| `GET`  | `/rooms/:otp` | Fetch room state |
+| `DELETE` | `/rooms/:otp` | Close room immediately |
+
+Room phases: `waiting → joined → active → closed`. Rooms expire after 15 minutes of inactivity. Invalid OTP formats return 400.
+
+## Connector API
+
+The connector proxy runs locally and bridges the skill to the rendezvous server.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/status` | Version + room_attached state |
+| `GET` | `/rooms/pending.json` | Serve `~/.irislink/rooms/pending.json` |
+| `POST` | `/message` | Forward `{room_otp, sender, text}` to rendezvous |
+| `GET` | `/events?room_otp=X&since=Y` | Fetch messages after cursor `Y` (unix ms) |
+| `POST` | `/ack` | Acknowledge `{room_otp, message_id}` |
+
+## OTP alphabet
+
+Codes use Crockford Base32: `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`
+
+`0`, `1`, `I`, `O` are excluded to prevent visual confusion. Codes are case-insensitive on input.
+
+## Repo layout
 
 ```
 IrisLink/
-├── README.md            # overview + roadmap (this file)
+├── cmd/irislink/main.go     # CLI entry point
+├── internal/
+│   ├── crypto/              # OTP generation, HKDF derivation
+│   ├── proxy/               # connector proxy HTTP handler
+│   ├── server/              # rendezvous server HTTP handler
+│   └── state/               # pending.json + config.json I/O
+├── irislink/
+│   ├── irislink.md          # Claude Code skill (install to ~/.claude/skills/)
+│   └── SKILL.md             # original spec (reference)
 ├── docs/
-│   ├── rendezvous.md    # detailed rendezvous + connector protocol
-│   └── ui-safety.md     # consent + safety UI guidelines
-│   └── web-ui.md        # OpenCode-inspired website + lobby layout
-├── server/              # Express rendezvous API (`npm start`)
-├── web/                 # Vite/React experience prototype (npm run dev)
-└── irislink/
-    └── SKILL.md         # Claude skill definition + orchestration spec
+│   ├── rendezvous.md        # detailed protocol spec
+│   ├── ui-safety.md         # consent + safety UI guidelines
+│   └── web-ui.md            # lobby UI design spec
+├── connectors/              # Python prototype (superseded by Go binary)
+├── server/                  # Python prototype (superseded by Go binary)
+└── web/                     # React lobby prototype
 ```
 
-Future directories:
+## What's next
 
-- `web/` — Vite/Svelte lobby app
-- `connectors/` — local proxies for Claude Code, Cursor, etc.
-- `docs/` — protocol diagrams, threat models, persona guides
+- End-to-end test harness (issue #3) — scripted two-session handshake
+- WebSocket support on the rendezvous server — eliminate polling
+- `irislink install` command that handles skill copy + shell profile update
+- Signed envelopes (`X-IrisLink-Signature`) — HMAC-SHA256 per message
+- Optional E2E encryption via libsodium for peers who don't trust the rendezvous host
 
-## Next Steps
-
-1. Flesh out the rendezvous protocol (HKDF inputs, room JSON schema, message envelopes, encryption design).
-2. Build a CLI/web view that can mint and display OTP codes for easy pairing.
-3. Prototype the mediation loop entirely inside the skill using mock transport calls, then backfill real network hooks.
-4. Document trust assumptions and telemetry expectations so collaborators know how "one-time pad" is used in practice.
-
-See `docs/rendezvous.md` for the detailed rendezvous API, HKDF inputs, and connector handshake.
-
-See `docs/ui-safety.md` for product/UX guidance around consent, capability toggles, and audit trails that keep kickoff processes under human control.
-
-See `docs/web-ui.md` for the top-down website and lobby layout plan that mirrors OpenCode’s command-forward visual language.
-
-### Local Lobby Preview
-
-```
-cd web
-npm install
-npm run dev
-```
-
-The dev server spins up the hero + lobby preview described in `docs/web-ui.md` so you can iterate on the visual system before wiring it to the rendezvous backend.
-
-### Rendezvous API (MVP)
-
-```
-cd server
-npm install
-npm start
-```
-
-The Express service listens on `PORT` (default `4173`) and exposes `/rooms`, `/rooms/:otp/join`, `/rooms/:otp/messages`, and related endpoints described in `docs/rendezvous.md`. During development the Vite dev server proxies `/api/*` to `http://localhost:4173`. In production Apache proxies `/api/*` on `irislink.nthmost.net` to the same service.
-
-Ethernet-cable braids and rainbow-coded OTPs await. :)
+See `docs/rendezvous.md` for the full protocol spec including HKDF derivation, envelope format, and planned WebSocket handshake.
