@@ -540,44 +540,67 @@ func (m tuiModel) buildSidebarItems() []sidebarItem {
 func (m tuiModel) renderClaudePanel(width int) []string {
 	inner := width - 1
 	sep := styleDivider.Render(" " + strings.Repeat("─", inner-1))
-
 	focused := m.focusArea == focusClaude
+
+	selectedBg := lipgloss.NewStyle().
+		Background(colDarkTeal).
+		Foreground(lipgloss.Color("#ffffff")).
+		Bold(true)
 
 	if m.cfg.ClaudeAPIKey == "" {
 		label := "  [ LOGIN ]"
 		var btn string
 		if focused {
-			btn = lipgloss.NewStyle().
-				Background(colDarkTeal).
-				Foreground(lipgloss.Color("#ffffff")).
-				Bold(true).
-				Render(padToVisible(label, inner))
+			btn = selectedBg.Render(padToVisible(label, inner))
 		} else {
 			btn = styleSidebarHint.Render(label)
 		}
-		return []string{sep, btn, styleSidebarHint.Render("  claude context"), ""}
+		return []string{
+			sep,
+			"",
+			styleSidebarHeader.Render(" claude"),
+			styleSidebarHint.Render("  context & mediation"),
+			"",
+			btn,
+			"",
+			"",
+		}
 	}
 
-	// logged in
+	// logged in — show status, model, key prefix, mode
 	masked := "sk-ant-..."
-	if len(m.cfg.ClaudeAPIKey) > 8 {
-		masked = m.cfg.ClaudeAPIKey[:8] + "..."
+	if len(m.cfg.ClaudeAPIKey) > 12 {
+		masked = m.cfg.ClaudeAPIKey[:12] + "..."
 	}
-	statusStyle := lipgloss.NewStyle().Foreground(colCyan)
+
+	// Context model is always haiku (fast); mediation uses opus if game-master
+	contextModel := "haiku-4-5"
+	mediateModel := "—"
+	switch m.mode {
+	case "mediate":
+		mediateModel = "haiku-4-5"
+	case "game-master":
+		mediateModel = "opus-4-6"
+	}
+
 	label := "  ✓ claude"
 	var header string
 	if focused {
-		header = lipgloss.NewStyle().
-			Background(colDarkTeal).
-			Foreground(lipgloss.Color("#ffffff")).
-			Bold(true).
-			Render(padToVisible(label, inner))
+		header = selectedBg.Render(padToVisible(label, inner))
 	} else {
-		header = statusStyle.Render(label)
+		header = lipgloss.NewStyle().Foreground(colCyan).Bold(true).Render(label)
 	}
-	keyLine := styleSidebarHint.Render("  " + masked)
-	hintLine := styleSidebarHint.Render("  enter: logout")
-	return []string{sep, header, keyLine, hintLine}
+
+	return []string{
+		sep,
+		header,
+		styleSidebarHint.Render("  " + masked),
+		"",
+		styleSidebarFile.Render("  context: " + contextModel),
+		styleSidebarFile.Render("  mediate: " + mediateModel),
+		"",
+		styleSidebarHint.Render("  enter: logout"),
+	}
 }
 
 // renderSidebar returns lines for the context sidebar (width = sidebarW).
@@ -588,8 +611,8 @@ func (m tuiModel) renderSidebar(totalRows int) []string {
 	sep := styleDivider.Render(" " + strings.Repeat("─", inner-1))
 	lines := []string{title, sep}
 
-	// Reserve last 5 rows for the claude panel (4 lines + 1 buffer).
-	treeRows := totalRows - 6
+	// Reserve last 8 rows for the claude panel.
+	treeRows := totalRows - 9
 	if treeRows < 0 {
 		treeRows = 0
 	}
