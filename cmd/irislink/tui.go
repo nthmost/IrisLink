@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -58,6 +59,13 @@ const (
 	sidebarW    = 26
 )
 
+func sendKey() string {
+	if runtime.GOOS == "darwin" {
+		return "opt+enter"
+	}
+	return "alt+enter"
+}
+
 // ─── message types ───────────────────────────────────────────────────────────
 
 type chatMsg struct {
@@ -92,7 +100,7 @@ type tuiModel struct {
 
 func initialModel(otp, handle, mode string, client *transport.Client, incoming chan transport.Envelope, cfg state.Config, cwd string, showWaiting bool) tuiModel {
 	ta := textarea.New()
-	ta.Placeholder = "write something... (alt+enter to send, /help for commands)"
+	ta.Placeholder = "write something... (" + sendKey() + " to send, /help for commands)"
 	ta.Focus()
 	ta.SetHeight(composeRows)
 	ta.CharLimit = 0
@@ -337,7 +345,7 @@ func (m tuiModel) View() string {
 	}
 	body := strings.Join(bodyParts, "\n")
 
-	hint := stylePrompt.Render("  alt+enter to send  •  /help for commands")
+	hint := stylePrompt.Render("  " + sendKey() + " to send  •  /help for commands")
 	divider := styleDivider.Render(strings.Repeat("─", w))
 
 	return strings.Join([]string{header, heavyDiv, body, divider, hint}, "\n")
@@ -491,7 +499,7 @@ func (m tuiModel) handleSlash(cmd string) (tea.Model, tea.Cmd) {
 		}
 
 	case "/help":
-		m.addSystem("alt+enter: send  •  /login <key>  •  /leave  •  /mode relay|mediate|game-master")
+		m.addSystem(sendKey() + ": send  •  /login <key>  •  /leave  •  /mode relay|mediate|game-master")
 
 	default:
 		m.addSystem("unknown command: " + parts[0])
