@@ -20,7 +20,7 @@ import (
 	"github.com/nthmost/IrisLink/internal/transport"
 )
 
-const consoleURL = "https://console.anthropic.com/settings/api-keys"
+const consoleURL = "https://console.anthropic.com"
 
 func openBrowser(url string) {
 	var cmd *exec.Cmd
