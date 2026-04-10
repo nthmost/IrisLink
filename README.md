@@ -15,29 +15,19 @@ hey, can you look at this diff?   [relay]  hey, can you look at this diff?
 
 ## How it works
 
-1. Person A runs `/irislink create` → gets a 6-char OTP, a room opens on the rendezvous server.
+1. Person A runs `/irislink create` → gets a 6-char OTP, connects to the MQTT broker.
 2. They share the code with Person B out-of-band (chat, clipboard, yell across the office).
-3. Person B runs `/irislink join <OTP>` → both sides connect, room goes `active`.
-4. A `UserPromptSubmit` hook fires on every message in each Claude session. It relays the message to the room and surfaces any inbound messages — no `/irislink` prefix required once connected.
-5. `/irislink leave` closes the room and removes the hook.
+3. Person B runs `/irislink join <OTP>` → both sides subscribe to the same encrypted room topic.
+4. A `UserPromptSubmit` hook fires on every message. It relays outbound messages and surfaces inbound — no `/irislink` prefix required once connected.
+5. `/irislink leave` disconnects and removes the hook.
 
-## Components
+## Transport and security
 
-Everything ships as a single Go binary: `irislink`.
+IrisLink uses MQTT as its transport. It requires no server of its own — point it at any existing MQTT broker (Home Assistant's Mosquitto add-on, a local Mosquitto instance, HiveMQ, etc.).
 
-| Subcommand | What it does |
-|------------|-------------|
-| `irislink server` | Rendezvous server — manages rooms, participants, messages (port 4173) |
-| `irislink proxy` | Connector proxy — bridges the Claude skill to the rendezvous API (port 8357) |
-| `irislink otp` | Generate a random 6-char Crockford Base32 OTP |
-| `irislink room-id <otp>` | HKDF-SHA256 derive a room_id from an OTP |
-| `irislink pending write/clear/connector` | Manage `~/.irislink/rooms/pending.json` |
-| `irislink send <url> <otp> <from> <text>` | POST a message via connector |
-| `irislink events <url> <otp> [since]` | GET events with cursor |
-| `irislink mediate <mode> <text>` | Transform text via LiteLLM |
-| `irislink hook` | UserPromptSubmit hook (stdin JSON → additionalContext JSON) |
+**E2E encryption:** every payload is encrypted with NaCl secretbox (ChaCha20-Poly1305) using a key derived from the OTP via HKDF-SHA256. The broker operator cannot read message content.
 
-The `/irislink` Claude Code skill lives at `irislink/irislink.md`. It instructs Claude how to use the binary for room lifecycle, message relay, and mediation.
+**Privacy:** topic names use a HKDF-derived `room_id`, never the OTP itself. MQTT client IDs are random UUIDs. The OTP never reaches the broker.
 
 ## Install
 
@@ -47,18 +37,18 @@ The `/irislink` Claude Code skill lives at `irislink/irislink.md`. It instructs 
 go install github.com/nthmost/IrisLink/cmd/irislink@latest
 ```
 
+Make sure `~/go/bin` is on your `PATH` (add to `~/.zshrc` or `~/.bashrc`):
+
+```bash
+export PATH="$HOME/go/bin:$PATH"
+```
+
 **Install the skill:**
 
 ```bash
 mkdir -p ~/.claude/skills/irislink
 curl -fsSL https://raw.githubusercontent.com/nthmost/IrisLink/main/irislink/SKILL.md \
   -o ~/.claude/skills/irislink/SKILL.md
-```
-
-Make sure `~/go/bin` is on your `PATH` (add to `~/.zshrc` or `~/.bashrc`):
-
-```bash
-export PATH="$HOME/go/bin:$PATH"
 ```
 
 **No Go on the target machine?** Cross-compile from a machine that has it:
@@ -70,62 +60,85 @@ scp irislink-linux user@host:~/bin/irislink
 
 Common targets: `GOOS=linux GOARCH=arm64` (Raspberry Pi, Apple Silicon Linux), `GOOS=darwin GOARCH=arm64` (Apple Silicon Mac).
 
-## Quick start — two machines
+## Broker setup
 
-**Machine A** (runs the rendezvous server):
+IrisLink needs an MQTT broker reachable by both parties. Point it at one in `~/.irislink/config.json`:
 
-```bash
-irislink server &   # port 4173
-irislink proxy &    # port 8357
+```json
+{
+  "broker_url": "mqtt://homeassistant.local:1883",
+  "broker_user": "irislink",
+  "broker_pass": "yourpassword"
+}
 ```
 
-Note Machine A's LAN IP (e.g. `192.168.1.10`).
+Leave out `broker_user`/`broker_pass` if the broker allows anonymous access.
 
-**Machine B** (joins — proxy points at Machine A's server):
+### Home Assistant (Mosquitto add-on)
 
-```bash
-IRISLINK_BASE_URL=http://192.168.1.10:4173 irislink proxy &
+HA's Mosquitto add-on authenticates via HA's own user system. To create a dedicated IrisLink user:
+
+1. Go to **Settings → People → Users** (enable Advanced Mode in your profile first).
+2. Click **Add User** — name it `irislink`, set a password, role: **User**.
+3. That username/password works directly for MQTT auth.
+4. To restrict IrisLink to only the `irislink/#` topic namespace, add an ACL to the Mosquitto add-on config in **Settings → Add-ons → Mosquitto broker → Configuration**:
+
+```yaml
+customize:
+  active: true
+  folder: mosquitto
 ```
 
-**Machine A's Claude session:**
+Then create `/config/mosquitto/acl.conf`:
 
+```
+user irislink
+topic readwrite irislink/#
+```
+
+And set in the Mosquitto add-on config:
+
+```yaml
+acl_file: /config/mosquitto/acl.conf
+```
+
+Restart the add-on to apply.
+
+### Standalone Mosquitto
+
+```bash
+# Create user
+mosquitto_passwd -c /etc/mosquitto/passwd irislink
+
+# /etc/mosquitto/conf.d/irislink.conf
+password_file /etc/mosquitto/passwd
+acl_file /etc/mosquitto/acl
+
+# /etc/mosquitto/acl
+user irislink
+topic readwrite irislink/#
+```
+
+## Quick start
+
+**Both machines** need a `~/.irislink/config.json` pointing at the same broker.
+
+**Person A's Claude session:**
 ```
 /irislink create
 ```
 
 Claude shows a 6-char code. Share it with Person B.
 
-**Machine B's Claude session:**
-
+**Person B's Claude session:**
 ```
 /irislink join <CODE>
 ```
 
-Once connected, both people type messages normally. No prefix needed — the hook relays everything automatically.
+Once connected, type normally — the hook relays everything automatically.
 
 ```
 /irislink leave    # when done
-```
-
-## Quick start — same machine (two terminal tabs)
-
-Person A uses the default connector port (8357). Person B needs a different one.
-
-**Person A:**
-```bash
-irislink server &   # shared server
-irislink proxy &    # connector on :8357
-# open Claude Code — /irislink create
-```
-
-**Person B:**
-```bash
-# Set a different connector port
-mkdir -p ~/.irislink
-echo '{"connector_url":"http://localhost:8358"}' > ~/.irislink/config.json
-
-irislink proxy --listen 8358 &
-# open a second Claude Code window — /irislink join <CODE>
 ```
 
 ## Mediation modes
@@ -135,8 +148,28 @@ Switch with `/irislink mode <relay|mediate|game-master>` at any time.
 | Mode | What Claude does |
 |------|-----------------|
 | `relay` | Pass-through. Messages arrive exactly as sent. No LLM call. |
-| `mediate` | Rewrites each outbound message to be clearer and more considerate before sending. Uses `loki/qwen-coder-14b` via LiteLLM at `spartacus.local:4000`. |
-| `game-master` | Adds a brief narrative flourish or creative prompt after each message. Uses `loki/qwen3-coder-30b`. |
+| `mediate` | Rewrites each outbound message to be clearer and more considerate. |
+| `game-master` | Adds a brief narrative flourish or creative prompt after each message. |
+
+Mediation uses LiteLLM. Configure the endpoint in `~/.irislink/config.json` (default: `http://spartacus.local:4000`).
+
+## Config reference
+
+`~/.irislink/config.json`:
+
+```json
+{
+  "broker_url": "mqtt://homeassistant.local:1883",
+  "broker_user": "irislink",
+  "broker_pass": "yourpassword"
+}
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `broker_url` | `mqtt://localhost:1883` | MQTT broker URL (`mqtt://` or `mqtts://`) |
+| `broker_user` | — | Broker username (optional) |
+| `broker_pass` | — | Broker password (optional) |
 
 ## State files
 
@@ -144,44 +177,13 @@ All runtime state lives under `~/.irislink/`:
 
 ```
 ~/.irislink/
-├── config.json              # {"connector_url": "http://localhost:8357"}
+├── config.json              # broker connection settings
 └── rooms/
     ├── pending.json         # active room: {"otp": "...", "room_id": "..."}
     ├── <otp>.meta           # {"handle": "...", "mode": "relay", "cursor": 0}
     ├── <otp>.log            # incoming messages (kept after leave)
     └── <otp>.pid            # background poller PID
 ```
-
-`config.json` is the only file you need to create manually, and only when using a non-default connector port.
-
-## Rendezvous API
-
-The server exposes a simple REST API. All endpoints return `{"room": {...}}` on success or `{"error": "..."}` on failure.
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| `POST` | `/rooms` | Create room, returns OTP + initial state |
-| `POST` | `/rooms/:otp/join` | Join existing room |
-| `POST` | `/rooms/:otp/participants` | Update participant status |
-| `POST` | `/rooms/:otp/mode` | Switch mediation mode |
-| `POST` | `/rooms/:otp/messages` | Append message |
-| `POST` | `/rooms/:otp/messages/:id/ack` | Acknowledge message |
-| `GET`  | `/rooms/:otp` | Fetch room state |
-| `DELETE` | `/rooms/:otp` | Close room immediately |
-
-Room phases: `waiting → joined → active → closed`. Rooms expire after 15 minutes of inactivity. Invalid OTP formats return 400.
-
-## Connector API
-
-The connector proxy runs locally and bridges the skill to the rendezvous server.
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET` | `/status` | Version + room_attached state |
-| `GET` | `/rooms/pending.json` | Serve `~/.irislink/rooms/pending.json` |
-| `POST` | `/message` | Forward `{room_otp, sender, text}` to rendezvous |
-| `GET` | `/events?room_otp=X&since=Y` | Fetch messages after cursor `Y` (unix ms) |
-| `POST` | `/ack` | Acknowledge `{room_otp, message_id}` |
 
 ## OTP alphabet
 
@@ -193,27 +195,23 @@ Codes use Crockford Base32: `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`
 
 ```
 IrisLink/
-├── cmd/irislink/main.go     # CLI entry point
+├── cmd/irislink/
+│   ├── main.go              # CLI entry point + low-level subcommands
+│   └── session.go           # create / join / leave / poll
 ├── internal/
-│   ├── crypto/              # OTP generation, HKDF derivation
-│   ├── proxy/               # connector proxy HTTP handler
-│   ├── server/              # rendezvous server HTTP handler
-│   └── state/               # pending.json + config.json I/O
+│   ├── crypto/              # OTP generation, HKDF derivation, NaCl Seal/Open
+│   ├── transport/           # MQTT v5 client, encrypted pub/sub
+│   └── state/               # config.json + pending.json + meta I/O
 ├── irislink/
-│   ├── irislink.md          # Claude Code skill (install to ~/.claude/skills/)
-│   └── SKILL.md             # original spec (reference)
+│   └── SKILL.md             # Claude Code skill
 └── docs/
-    ├── rendezvous.md        # detailed protocol spec
+    ├── architecture.md      # transport and crypto design
     ├── ui-safety.md         # consent + safety UI guidelines
     └── web-ui.md            # lobby UI design spec
 ```
 
 ## What's next
 
-- End-to-end test harness (issue #3) — scripted two-session handshake
-- WebSocket support on the rendezvous server — eliminate polling
-- `irislink install` command that handles skill copy + shell profile update
-- Signed envelopes (`X-IrisLink-Signature`) — HMAC-SHA256 per message
-- Optional E2E encryption via libsodium for peers who don't trust the rendezvous host
-
-See `docs/rendezvous.md` for the full protocol spec including HKDF derivation, envelope format, and planned WebSocket handshake.
+- nthmost/IrisLink#1 — pre-built binaries via goreleaser + GitHub Actions
+- nthmost/IrisLink#2 — MQTT transport (this is it, in progress)
+- nthmost/IrisLink#3 — SSH key-based identity + encryption upgrade
