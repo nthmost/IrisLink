@@ -572,33 +572,19 @@ func (m tuiModel) renderClaudePanel(width int) []string {
 		}
 		return []string{
 			sep,
-			"",
 			styleSidebarHeader.Render(" claude"),
-			styleSidebarHint.Render("  context & mediation"),
-			"",
 			btn,
 			"",
 			"",
+			"",
+			"",
+			"",
 		}
 	}
 
-	// logged in — show status, model, key prefix, mode
 	masked := "sk-ant-..."
 	if len(m.cfg.ClaudeAPIKey) > 12 {
 		masked = m.cfg.ClaudeAPIKey[:12] + "..."
-	}
-
-	// Context selection always uses haiku (fast/cheap).
-	// Mediation model is user-configurable; default is sonnet-4-6.
-	contextModel := "haiku-4-5"
-	mediateModel := "—"
-	if m.mode == "mediate" || m.mode == "game-master" {
-		model := m.cfg.ClaudeModel
-		if model == "" {
-			model = "claude-sonnet-4-6"
-		}
-		// Show a short label: strip "claude-" prefix for display.
-		mediateModel = strings.TrimPrefix(model, "claude-")
 	}
 
 	label := "  ✓ claude"
@@ -614,8 +600,8 @@ func (m tuiModel) renderClaudePanel(width int) []string {
 		header,
 		styleSidebarHint.Render("  " + masked),
 		"",
-		styleSidebarFile.Render("  context: " + contextModel),
-		styleSidebarFile.Render("  mediate: " + mediateModel),
+		"",
+		"",
 		"",
 		styleSidebarHint.Render("  enter: logout"),
 	}
@@ -626,29 +612,32 @@ func (m tuiModel) renderModePanel(width int) []string {
 	inner := width - 1
 	focused := m.focusArea == focusMode
 
-	selectedBg := lipgloss.NewStyle().
+	activeBg := lipgloss.NewStyle().
 		Background(colDarkTeal).
 		Foreground(lipgloss.Color("#ffffff")).
 		Bold(true)
+	activeStyle := lipgloss.NewStyle().Foreground(colViolet).Bold(true)
+	inactiveStyle := lipgloss.NewStyle().Foreground(colDimGray)
 
 	modes := []string{"relay", "mediate", "game-master"}
-	var modeLabel string
+	var rows []string
 	for _, mo := range modes {
-		if m.mode == mo {
-			modeLabel = "  ● " + mo
+		label := "  " + mo
+		if mo == m.mode {
+			label = "  ● " + mo
+			if focused {
+				rows = append(rows, activeBg.Render(padToVisible(label, inner)))
+			} else {
+				rows = append(rows, activeStyle.Render(label))
+			}
+		} else {
+			rows = append(rows, inactiveStyle.Render(label))
 		}
 	}
-	var row string
-	if focused {
-		row = selectedBg.Render(padToVisible(modeLabel, inner))
-	} else {
-		row = lipgloss.NewStyle().Foreground(colViolet).Bold(true).Render(modeLabel)
-	}
 
-	return []string{
-		styleSidebarHeader.Render(" mode"),
-		row,
-	}
+	hint := styleSidebarHint.Render("  enter: cycle")
+
+	return append([]string{styleSidebarHeader.Render(" mode")}, append(rows, hint)...)
 }
 
 // renderSidebar returns lines for the context sidebar (width = sidebarW).
@@ -658,13 +647,13 @@ func (m tuiModel) renderSidebar(totalRows int) []string {
 
 	// Mode panel (2 lines) at top, then sep (1), then context title (1), then sep (1),
 	// then tree, then claude panel (8) at bottom.
-	// Fixed lines: 2 + 1 + 1 + 1 + 8 = 13.
+	// Fixed lines: mode(5) + sep(1) + context(1) + sep(1) + claude(8) = 16.
 	modePanelLines := m.renderModePanel(sidebarW)
 	lines := append(modePanelLines, sep)
 	lines = append(lines, styleSidebarHeader.Render(" context"))
 	lines = append(lines, sep)
 
-	treeRows := totalRows - 13
+	treeRows := totalRows - 16
 	if treeRows < 0 {
 		treeRows = 0
 	}
