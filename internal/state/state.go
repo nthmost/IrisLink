@@ -56,26 +56,54 @@ func ClearPending() error {
 
 // Config represents ~/.irislink/config.json
 type Config struct {
-	ConnectorURL  string `json:"connector_url"`
-	RendezvousURL string `json:"rendezvous_url"`
+	BrokerURL string `json:"broker_url"`
+	Username  string `json:"broker_user"`
+	Password  string `json:"broker_pass"`
+}
+
+func defaultConfig() Config {
+	return Config{BrokerURL: "mqtt://localhost:1883"}
 }
 
 func ReadConfig() Config {
 	data, err := os.ReadFile(filepath.Join(irisDir(), "config.json"))
 	if err != nil {
-		return Config{ConnectorURL: "http://localhost:8357", RendezvousURL: "http://localhost:4173"}
+		return defaultConfig()
 	}
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
-		return Config{ConnectorURL: "http://localhost:8357", RendezvousURL: "http://localhost:4173"}
+		return defaultConfig()
 	}
-	if c.ConnectorURL == "" {
-		c.ConnectorURL = "http://localhost:8357"
-	}
-	if c.RendezvousURL == "" {
-		c.RendezvousURL = "http://localhost:4173"
+	if c.BrokerURL == "" {
+		c.BrokerURL = "mqtt://localhost:1883"
 	}
 	return c
+}
+
+// BrokerAddr returns host:port suitable for net.Dial from the broker_url.
+func (c Config) BrokerAddr() string {
+	url := c.BrokerURL
+	// strip scheme
+	for _, prefix := range []string{"mqtts://", "mqtt://", "tcp://"} {
+		if len(url) > len(prefix) && url[:len(prefix)] == prefix {
+			url = url[len(prefix):]
+			break
+		}
+	}
+	// add default port if missing
+	if !containsColon(url) {
+		url += ":1883"
+	}
+	return url
+}
+
+func containsColon(s string) bool {
+	for _, c := range s {
+		if c == ':' {
+			return true
+		}
+	}
+	return false
 }
 
 // Meta represents ~/.irislink/rooms/<otp>.meta

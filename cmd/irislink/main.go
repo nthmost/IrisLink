@@ -5,18 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
-	"os/signal"
-	"strconv"
 	"strings"
-	"syscall"
+	"time"
 
 	ilcrypto "github.com/nthmost/IrisLink/internal/crypto"
-	"github.com/nthmost/IrisLink/internal/proxy"
-	"github.com/nthmost/IrisLink/internal/server"
 	"github.com/nthmost/IrisLink/internal/state"
+	"github.com/nthmost/IrisLink/internal/transport"
 )
 
 func main() {
@@ -33,10 +29,6 @@ func main() {
 		runLeave()
 	case "poll":
 		runPoll()
-	case "server":
-		runServer()
-	case "proxy":
-		runProxy()
 	case "otp":
 		runOTP()
 	case "room-id":
@@ -45,8 +37,6 @@ func main() {
 		runPending()
 	case "send":
 		runSend()
-	case "events":
-		runEvents()
 	case "mediate":
 		runMediate()
 	case "hook":
@@ -64,67 +54,24 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `irislink — Claude-to-Claude pairing tool
 
 Session commands:
-  create <handle> [mode]      Create room, register hook, start poller
-  join <otp> <handle> [mode]  Join room, register hook, start poller
-  leave                       Close room, kill poller, deregister hook
-
-Infrastructure:
-  server                      Start the rendezvous server (default port 4173)
-  proxy                       Start the connector proxy (default port 8357)
+  create <handle> [mode]       Create room, register hook, start poller
+  join <otp> <handle> [mode]   Join room, register hook, start poller
+  leave                        Close room, kill poller, deregister hook
 
 Low-level / debug:
-  otp                         Generate a random 6-char OTP
-  room-id <otp>               Derive room_id from OTP via HKDF
-  pending write <otp> <rid>   Write ~/.irislink/rooms/pending.json
-  pending clear               Remove pending.json
-  pending connector           Print connector URL from config
-  send <url> <otp> <from> <text>  POST a message via connector
-  events <url> <otp> [since]  GET events from connector
-  mediate <mode> <text>       Transform text via LiteLLM (relay|mediate|game-master)
-  hook                        UserPromptSubmit hook (reads JSON stdin)
-  version                     Print version`)
-}
+  otp                          Generate a random 6-char OTP
+  room-id <otp>                Derive room_id from OTP via HKDF
+  pending write <otp> <rid>    Write ~/.irislink/rooms/pending.json
+  pending clear                Remove pending.json
+  send <otp> <text>            Publish a message to the active room
+  mediate <mode> <text>        Transform text via LiteLLM (relay|mediate|game-master)
+  hook                         UserPromptSubmit hook (reads JSON stdin)
+  version                      Print version
 
-// --- server ---
-
-func runServer() {
-	port := envOr("PORT", "4173")
-	srv := server.New()
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	srv.StartSweep(ctx)
-	addr := ":" + port
-	fmt.Fprintf(os.Stderr, "IrisLink rendezvous server on %s\n", addr)
-	httpSrv := &http.Server{Addr: addr, Handler: srv.Handler()}
-	go func() {
-		<-ctx.Done()
-		httpSrv.Shutdown(context.Background())
-	}()
-	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		fatal(err)
-	}
-}
-
-// --- proxy ---
-
-func runProxy() {
-	port := envOr("CONNECTOR_PORT", "8357")
-	if len(os.Args) >= 4 && os.Args[2] == "--listen" {
-		port = os.Args[3]
-	}
-	rendezvous := envOr("IRISLINK_BASE_URL", "http://localhost:4173")
-	addr := ":" + port
-	fmt.Fprintf(os.Stderr, "IrisLink connector proxy on %s → %s\n", addr, rendezvous)
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	httpSrv := &http.Server{Addr: addr, Handler: proxy.Handler(rendezvous)}
-	go func() {
-		<-ctx.Done()
-		httpSrv.Shutdown(context.Background())
-	}()
-	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		fatal(err)
-	}
+Config (~/.irislink/config.json):
+  broker_url   MQTT broker URL (default: mqtt://localhost:1883)
+  broker_user  Optional broker username
+  broker_pass  Optional broker password`)
 }
 
 // --- otp ---
@@ -154,7 +101,7 @@ func runRoomID() {
 
 func runPending() {
 	if len(os.Args) < 3 {
-		fatalf("usage: irislink pending <write|clear|connector>")
+		fatalf("usage: irislink pending <write|clear>")
 	}
 	switch os.Args[2] {
 	case "write":
@@ -170,8 +117,6 @@ func runPending() {
 			fatal(err)
 		}
 		fmt.Println("ok")
-	case "connector":
-		fmt.Println(state.ReadConfig().ConnectorURL)
 	default:
 		fatalf("unknown pending subcommand: %s", os.Args[2])
 	}
@@ -180,39 +125,36 @@ func runPending() {
 // --- send ---
 
 func runSend() {
-	if len(os.Args) < 6 {
-		fatalf("usage: irislink send <connector_url> <otp> <sender> <text>")
-	}
-	connURL, otp, sender, text := os.Args[2], os.Args[3], os.Args[4], os.Args[5]
-	payload, _ := json.Marshal(map[string]string{"room_otp": otp, "sender": sender, "text": text})
-	resp, err := http.Post(connURL+"/message", "application/json", bytes.NewReader(payload))
-	if err != nil {
-		fatal(err)
-	}
-	defer resp.Body.Close()
-	io.Copy(os.Stdout, resp.Body)
-	fmt.Println()
-}
-
-// --- events ---
-
-func runEvents() {
 	if len(os.Args) < 4 {
-		fatalf("usage: irislink events <connector_url> <otp> [since]")
+		fatalf("usage: irislink send <otp> <text>")
 	}
-	connURL, otp := os.Args[2], os.Args[3]
-	since := "0"
-	if len(os.Args) >= 5 {
-		since = os.Args[4]
+	otp := strings.ToUpper(os.Args[2])
+	text := os.Args[3]
+
+	p, err := state.ReadPending()
+	if err != nil || p == nil {
+		fatalf("no active room")
 	}
-	url := fmt.Sprintf("%s/events?room_otp=%s&since=%s", connURL, otp, since)
-	resp, err := http.Get(url)
+
+	key, err := ilcrypto.DeriveEncKey(otp)
 	if err != nil {
 		fatal(err)
 	}
-	defer resp.Body.Close()
-	io.Copy(os.Stdout, resp.Body)
-	fmt.Println()
+	meta := state.ReadMeta(otp)
+	cfg := state.ReadConfig()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, err := transport.Connect(ctx, cfg.BrokerAddr(), p.RoomID, meta.Handle, key, func(transport.Envelope) {})
+	if err != nil {
+		fatal(err)
+	}
+	defer client.Disconnect(ctx)
+
+	if err := client.Publish(ctx, transport.Envelope{Type: "message", Text: text}); err != nil {
+		fatal(err)
+	}
+	fmt.Println("sent")
 }
 
 // --- mediate ---
@@ -276,7 +218,6 @@ func runHook() {
 		os.Exit(0)
 	}
 
-	// Let explicit /irislink commands pass through
 	if strings.HasPrefix(strings.TrimSpace(event.Prompt), "/irislink") {
 		os.Exit(0)
 	}
@@ -286,43 +227,33 @@ func runHook() {
 		os.Exit(0)
 	}
 
-	cfg := state.ReadConfig()
-	connURL := cfg.ConnectorURL
-
-	// Read meta for handle/mode/cursor
 	meta := state.ReadMeta(p.OTP)
-	handle, mode, cursor := meta.Handle, meta.Mode, meta.Cursor
-
-	// Read recent log lines
 	inbound := readLog(p.OTP, 5)
 
-	context := fmt.Sprintf(`## Active IrisLink Session
+	additionalContext := fmt.Sprintf(`## Active IrisLink Session
 
-OTP: %s
-Your handle: %s
-Mode: %s
-Connector: %s
+Your handle: %s  •  mode: %s  •  broker: %s
 
-**Relay this message to the IrisLink room before responding.**
+**Before responding, relay this message to the IrisLink room:**
 
-Steps:
-1. If mode is not relay, run: irislink mediate %s %q
-   Show mediated version and confirm before sending.
-2. Send: irislink send %s %s %s %q
-3. Check inbound: irislink events %s %s %s
-
-Recent inbound messages:
 %s
 
-After relaying, respond normally. To exit relay mode: /irislink leave`,
-		p.OTP, handle, mode, connURL,
-		mode, event.Prompt,
-		connURL, p.OTP, handle, event.Prompt,
-		connURL, p.OTP, strconv.FormatInt(cursor, 10),
+Steps:
+1. If mode is not relay: irislink mediate %s %q — show result and confirm.
+2. Send: irislink send %s %q
+3. Recent inbound messages (also in ~/.irislink/rooms/%s.log):
+%s
+
+After relaying, respond normally. /irislink leave to exit.`,
+		meta.Handle, meta.Mode, state.ReadConfig().BrokerURL,
+		event.Prompt,
+		meta.Mode, event.Prompt,
+		p.OTP, event.Prompt,
+		p.OTP,
 		inbound,
 	)
 
-	json.NewEncoder(os.Stdout).Encode(map[string]string{"additionalContext": context})
+	json.NewEncoder(os.Stdout).Encode(map[string]string{"additionalContext": additionalContext})
 }
 
 // --- helpers ---
