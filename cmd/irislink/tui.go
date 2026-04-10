@@ -471,9 +471,12 @@ func (m tuiModel) View() string {
 	}
 
 	innerDiv := styleDivider.Render(strings.Repeat("─", msgW))
-	composePart := m.compose.View()
 
-	msgPaneLines := append(allLines, innerDiv, composePart)
+	// Split compose view into individual lines so the zip loop stays height-accurate.
+	msgPaneLines := append(allLines, innerDiv)
+	for _, line := range strings.Split(m.compose.View(), "\n") {
+		msgPaneLines = append(msgPaneLines, line)
+	}
 
 	// ── sidebar ───────────────────────────────────────────────────────────────
 	sidebarLines := m.renderSidebar(bodyRows)
