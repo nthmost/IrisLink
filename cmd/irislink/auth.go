@@ -87,7 +87,7 @@ const authHTML = `<!DOCTYPE html>
 <div class="card">
   <h1>IRISLINK</h1>
   <div class="sub">claude authentication</div>
-  <div class="step">1. <a href="https://console.anthropic.com" target="_blank">Open Anthropic Console ↗</a></div>
+  <div class="step">1. <a href="https://platform.claude.com/settings/keys" target="_blank">Get API Key ↗</a></div>
   <div class="step">2. Navigate to API Keys and create or copy a key.</div>
   <div class="step">3. Paste it below.</div>
   <form method="POST" action="/">
