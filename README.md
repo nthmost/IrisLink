@@ -41,39 +41,43 @@ The `/irislink` Claude Code skill lives at `irislink/irislink.md`. It instructs 
 
 ## Install
 
-**Build from source** (requires Go 1.21+):
+**One-liner** (requires Go 1.21+):
 
 ```bash
-git clone git@github.com:nthmost/IrisLink.git
-cd IrisLink
-go build -o ~/bin/irislink ./cmd/irislink
-```
-
-Make sure `~/bin` is on your `PATH`. Add this to your shell profile if needed:
-
-```bash
-export PATH="$HOME/bin:$PATH"
+go install github.com/nthmost/IrisLink/cmd/irislink@latest
 ```
 
 **Install the skill:**
 
 ```bash
-cp irislink/irislink.md ~/.claude/skills/irislink.md
+curl -fsSL https://raw.githubusercontent.com/nthmost/IrisLink/main/irislink/irislink.md \
+  -o ~/.claude/skills/irislink.md
+```
+
+Make sure `$(go env GOPATH)/bin` is on your `PATH`:
+
+```bash
+export PATH="$(go env GOPATH)/bin:$PATH"
 ```
 
 ## Quick start — two machines
 
-**Both machines:**
+**Machine A** (runs the rendezvous server):
 
 ```bash
-# Terminal 1: rendezvous server (run on one machine, both point to it)
-irislink server
-
-# Terminal 2: connector
-irislink proxy
+irislink server &   # port 4173
+irislink proxy &    # port 8357
 ```
 
-**Person A's Claude session:**
+Note Machine A's LAN IP (e.g. `192.168.1.10`).
+
+**Machine B** (joins — proxy points at Machine A's server):
+
+```bash
+IRISLINK_BASE_URL=http://192.168.1.10:4173 irislink proxy &
+```
+
+**Machine A's Claude session:**
 
 ```
 /irislink create
@@ -81,7 +85,7 @@ irislink proxy
 
 Claude shows a 6-char code. Share it with Person B.
 
-**Person B's Claude session:**
+**Machine B's Claude session:**
 
 ```
 /irislink join <CODE>
