@@ -46,6 +46,16 @@ var (
 
 	styleSystem = lipgloss.NewStyle().Foreground(colDimGray).Italic(true)
 	stylePrompt = lipgloss.NewStyle().Foreground(colDimBlue)
+
+	styleSidebarHeader = lipgloss.NewStyle().Foreground(colDimBlue).Bold(true)
+	styleSidebarFile   = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
+	styleSidebarSent   = lipgloss.NewStyle().Foreground(colCyan)
+	styleSidebarHint   = lipgloss.NewStyle().Foreground(colDimGray).Italic(true)
+)
+
+const (
+	composeRows = 5
+	sidebarW    = 26
 )
 
 // ─── message types ───────────────────────────────────────────────────────────
@@ -64,8 +74,6 @@ type sendErrMsg struct{ err error }
 
 // ─── model ───────────────────────────────────────────────────────────────────
 
-const composeRows = 5
-
 type tuiModel struct {
 	messages    []chatMsg
 	compose     textarea.Model
@@ -78,18 +86,18 @@ type tuiModel struct {
 	cwd         string
 	width       int
 	height      int
-	showWaiting bool // creator mode: show OTP popover until partner joins
+	showWaiting bool
+	sentFiles   map[string]bool // files sent as context this session
 }
 
 func initialModel(otp, handle, mode string, client *transport.Client, incoming chan transport.Envelope, cfg state.Config, cwd string, showWaiting bool) tuiModel {
 	ta := textarea.New()
-	ta.Placeholder = "write something... (ctrl+d to send, /help for commands)"
+	ta.Placeholder = "write something... (alt+enter to send, /help for commands)"
 	ta.Focus()
 	ta.SetHeight(composeRows)
-	ta.CharLimit = 0 // no limit
+	ta.CharLimit = 0
 	ta.ShowLineNumbers = false
 
-	// Remove the default lipgloss border — we draw our own dividers
 	blurred, focused := textarea.DefaultStyles()
 	noBorder := lipgloss.NewStyle()
 	blurred.Base = noBorder
@@ -98,21 +106,21 @@ func initialModel(otp, handle, mode string, client *transport.Client, incoming c
 	focused.CursorLine = lipgloss.NewStyle().Foreground(colCyan)
 	ta.BlurredStyle = blurred
 	ta.FocusedStyle = focused
-
 	ta.Prompt = ""
 
 	return tuiModel{
 		compose:     ta,
 		showWaiting: showWaiting,
-		otp:      otp,
-		handle:   handle,
-		mode:     mode,
-		client:   client,
-		incoming: incoming,
-		cfg:      cfg,
-		cwd:      cwd,
-		width:    80,
-		height:   24,
+		otp:         otp,
+		handle:      handle,
+		mode:        mode,
+		client:      client,
+		incoming:    incoming,
+		cfg:         cfg,
+		cwd:         cwd,
+		width:       80,
+		height:      24,
+		sentFiles:   make(map[string]bool),
 	}
 }
 
@@ -145,20 +153,27 @@ func (m tuiModel) Init() tea.Cmd {
 
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	skipCompose := false
 
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.compose.SetWidth(m.width - 2)
+		msgW := m.width - sidebarW - 2
+		if msgW < 20 {
+			msgW = 20
+		}
+		m.compose.SetWidth(msgW)
 
 	case tea.KeyMsg:
-		switch msg.Type {
-		case tea.KeyCtrlC:
+		switch {
+		case msg.Type == tea.KeyCtrlC:
 			return m, tea.Quit
 
-		case tea.KeyCtrlD:
+		case msg.Alt && msg.Type == tea.KeyEnter:
+			// Alt+Enter sends — don't forward to textarea
+			skipCompose = true
 			raw := strings.TrimSpace(m.compose.Value())
 			m.compose.Reset()
 			if raw == "" {
@@ -201,13 +216,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	var composeCmd tea.Cmd
-	m.compose, composeCmd = m.compose.Update(msg)
-	cmds = append(cmds, composeCmd)
+	if !skipCompose {
+		m.compose, composeCmd = m.compose.Update(msg)
+		cmds = append(cmds, composeCmd)
+	}
 
 	return m, tea.Batch(cmds...)
 }
 
-// sendMsg builds and publishes an envelope.
+// sendMsg builds, mediates if needed, selects context, and publishes.
 func (m *tuiModel) sendMsg(text string) tea.Cmd {
 	return func() tea.Msg {
 		finalText := text
@@ -221,6 +238,9 @@ func (m *tuiModel) sendMsg(text string) tea.Cmd {
 			}
 			if ctx, err := claude.SelectContext(m.cfg.ClaudeAPIKey, text, m.cwd); err == nil {
 				blocks = ctx
+				for _, b := range blocks {
+					m.sentFiles[b.Source] = true
+				}
 			}
 		}
 
@@ -244,118 +264,168 @@ func (m tuiModel) View() string {
 		w = 80
 	}
 
-	divider := styleDivider.Render(strings.Repeat("─", w))
-	heavyDiv := styleDivider.Render(strings.Repeat("━", w))
-
-	// Header: IRISLINK  OTP  mode  handle
 	otpStyle := lipgloss.NewStyle().Bold(true).Foreground(colPink)
 	header := styleHeader.Render("IRISLINK") +
 		"  " + otpStyle.Render(m.otp) +
 		"  " + styleHeaderDim.Render(m.mode) +
 		"  " + styleHeaderDim.Render(m.handle)
 
-	// Waiting popover: show centered box until partner joins.
+	heavyDiv := styleDivider.Render(strings.Repeat("━", w))
+
 	if m.showWaiting {
 		return m.renderWaitingPopover(header, heavyDiv, w)
 	}
 
-	// Available height for message scroll area.
-	// Layout: header(1) + heavyDiv(1) + msgs + heavyDiv(1) + compose(composeRows) + hint(1) = height
-	msgRows := m.height - composeRows - 4
+	// Layout: header(1) + heavyDiv(1) + body(msgRows+composeRows+1) + divider(1) + hint(1)
+	bodyRows := m.height - 4
+	if bodyRows < composeRows+2 {
+		bodyRows = composeRows + 2
+	}
+	msgRows := bodyRows - composeRows - 2 // -2 for inner divider + blank
 	if msgRows < 1 {
 		msgRows = 1
 	}
 
-	// Render messages into lines (each message may be multiple lines).
+	msgW := w - sidebarW - 1 // 1 for the │ separator
+	if msgW < 20 {
+		msgW = 20
+	}
+
+	// ── message pane ──────────────────────────────────────────────────────────
 	var allLines []string
 	for i, cm := range m.messages {
 		if i > 0 {
-			allLines = append(allLines, "") // blank line between messages
+			allLines = append(allLines, "")
 		}
-		allLines = append(allLines, renderMsg(cm, w)...)
+		allLines = append(allLines, renderMsg(cm, msgW)...)
 	}
-
-	// Take the last msgRows lines.
 	if len(allLines) > msgRows {
 		allLines = allLines[len(allLines)-msgRows:]
 	}
-	// Pad top with empty lines.
 	for len(allLines) < msgRows {
 		allLines = append([]string{""}, allLines...)
 	}
-	msgBlock := strings.Join(allLines, "\n")
 
-	hint := stylePrompt.Render("  ctrl+d to send  •  /help for commands")
+	innerDiv := styleDivider.Render(strings.Repeat("─", msgW))
+	composePart := m.compose.View()
 
-	return strings.Join([]string{
-		header,
-		heavyDiv,
-		msgBlock,
-		heavyDiv,
-		m.compose.View(),
-		divider,
-		hint,
-	}, "\n")
+	msgPaneLines := append(allLines, innerDiv, composePart)
+
+	// ── sidebar ───────────────────────────────────────────────────────────────
+	sidebarLines := m.renderSidebar(bodyRows)
+
+	// ── zip panes side by side ────────────────────────────────────────────────
+	sep := styleDivider.Render("│")
+	maxLines := len(msgPaneLines)
+	if len(sidebarLines) > maxLines {
+		maxLines = len(sidebarLines)
+	}
+	var bodyParts []string
+	for i := 0; i < maxLines; i++ {
+		left := ""
+		if i < len(msgPaneLines) {
+			left = msgPaneLines[i]
+		}
+		// Pad left to msgW so the separator stays aligned.
+		left = padToVisible(left, msgW)
+
+		right := ""
+		if i < len(sidebarLines) {
+			right = sidebarLines[i]
+		}
+		bodyParts = append(bodyParts, left+sep+right)
+	}
+	body := strings.Join(bodyParts, "\n")
+
+	hint := stylePrompt.Render("  alt+enter to send  •  /help for commands")
+	divider := styleDivider.Render(strings.Repeat("─", w))
+
+	return strings.Join([]string{header, heavyDiv, body, divider, hint}, "\n")
 }
 
-// renderMsg returns the lines for one chat message.
-// Long text is word-wrapped to fit within w.
+// renderSidebar returns lines for the context sidebar (width = sidebarW).
+func (m tuiModel) renderSidebar(totalRows int) []string {
+	inner := sidebarW - 1 // leave 1 char padding after │
+
+	title := styleSidebarHeader.Render(" context")
+	sep := styleDivider.Render(" " + strings.Repeat("─", inner-1))
+
+	lines := []string{title, sep}
+
+	files := cwdFiles(m.cwd)
+	if len(files) == 0 {
+		lines = append(lines, styleSidebarHint.Render(" (empty dir)"))
+	}
+	for _, f := range files {
+		label := " " + f
+		if len(label) > inner {
+			label = " …" + label[len(label)-(inner-2):]
+		}
+		if m.sentFiles[f] {
+			lines = append(lines, styleSidebarSent.Render(label))
+		} else {
+			lines = append(lines, styleSidebarFile.Render(label))
+		}
+	}
+
+	if m.cfg.ClaudeAPIKey == "" {
+		lines = append(lines, "")
+		lines = append(lines, styleSidebarHint.Render(" /login to enable"))
+		lines = append(lines, styleSidebarHint.Render(" auto-context"))
+	}
+
+	// Pad to totalRows.
+	for len(lines) < totalRows {
+		lines = append(lines, "")
+	}
+	return lines
+}
+
+// padToVisible pads s to width w ignoring ANSI escape sequences.
+func padToVisible(s string, w int) string {
+	vis := lipgloss.Width(s)
+	if vis >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-vis)
+}
+
+// ─── waiting popover ─────────────────────────────────────────────────────────
+
 func (m tuiModel) renderWaitingPopover(header, heavyDiv string, w int) string {
-	// Build the popover box content.
 	boxW := 36
 	if boxW > w-4 {
 		boxW = w - 4
 	}
 
-	otpBig := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(colPink).
-		Width(boxW).
-		Align(lipgloss.Center).
-		Render(m.otp)
+	otpBig := lipgloss.NewStyle().Bold(true).Foreground(colPink).
+		Width(boxW).Align(lipgloss.Center).Render(m.otp)
+	label := lipgloss.NewStyle().Foreground(colDimBlue).
+		Width(boxW).Align(lipgloss.Center).Render("share this code with your partner")
+	waiting := lipgloss.NewStyle().Foreground(colCyan).Italic(true).
+		Width(boxW).Align(lipgloss.Center).Render("waiting for connection...")
 
-	labelStyle := lipgloss.NewStyle().
-		Foreground(colDimBlue).
-		Width(boxW).
-		Align(lipgloss.Center)
-
-	waitStyle := lipgloss.NewStyle().
-		Foreground(colCyan).
-		Italic(true).
-		Width(boxW).
-		Align(lipgloss.Center)
-
-	boxContent := strings.Join([]string{
-		"",
-		labelStyle.Render("share this code with your partner"),
-		"",
-		otpBig,
-		"",
-		waitStyle.Render("waiting for connection..."),
-		"",
-	}, "\n")
-
+	boxContent := strings.Join([]string{"", label, "", otpBig, "", waiting, ""}, "\n")
 	box := lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).
 		BorderForeground(colDarkTeal).
 		Padding(0, 2).
 		Render(boxContent)
 
-	// Center the box vertically and horizontally.
-	h := m.height - 3 // leave room for header + hint
+	h := m.height - 3
 	centered := lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, box)
-
 	hint := stylePrompt.Render("  ctrl+c to quit")
 
 	return strings.Join([]string{header, heavyDiv, centered, hint}, "\n")
 }
+
+// ─── message rendering ───────────────────────────────────────────────────────
 
 func renderMsg(cm chatMsg, w int) []string {
 	if cm.isSystem {
 		return []string{styleSystem.Render("  ∙ " + cm.text)}
 	}
 
-	// Header line: sender  timestamp
 	var senderStr string
 	if cm.isSelf {
 		senderStr = styleSenderSelf.Render("you")
@@ -365,10 +435,9 @@ func renderMsg(cm chatMsg, w int) []string {
 	tsStr := styleTimestamp.Render(cm.ts.Format("02 Jan 15:04"))
 	headerLine := "  " + senderStr + "  " + tsStr
 
-	// Body: wrap text, indent each line.
 	textW := w - 4
-	if textW < 20 {
-		textW = 20
+	if textW < 10 {
+		textW = 10
 	}
 	var textStyle lipgloss.Style
 	if cm.isSelf {
@@ -377,7 +446,6 @@ func renderMsg(cm chatMsg, w int) []string {
 		textStyle = styleTextOther.Width(textW)
 	}
 
-	// Split on existing newlines first, then wrap each paragraph.
 	var bodyLines []string
 	for _, para := range strings.Split(cm.text, "\n") {
 		wrapped := textStyle.Render(para)
@@ -421,12 +489,48 @@ func (m tuiModel) handleSlash(cmd string) (tea.Model, tea.Cmd) {
 		}
 
 	case "/help":
-		m.addSystem("ctrl+d: send  •  /login <key>  •  /leave  •  /mode relay|mediate|game-master")
+		m.addSystem("alt+enter: send  •  /login <key>  •  /leave  •  /mode relay|mediate|game-master")
 
 	default:
 		m.addSystem("unknown command: " + parts[0])
 	}
 	return m, nil
+}
+
+// ─── filesystem helpers ──────────────────────────────────────────────────────
+
+var skipDirs = map[string]bool{
+	".git": true, "node_modules": true, "vendor": true,
+	".cache": true, "__pycache__": true, "irislink-context": true,
+}
+
+// cwdFiles returns relative file paths up to 2 levels deep, skipping noise.
+func cwdFiles(root string) []string {
+	var files []string
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") || skipDirs[e.Name()] {
+			continue
+		}
+		if e.IsDir() {
+			sub, _ := os.ReadDir(filepath.Join(root, e.Name()))
+			for _, se := range sub {
+				if strings.HasPrefix(se.Name(), ".") || se.IsDir() {
+					continue
+				}
+				files = append(files, e.Name()+"/"+se.Name())
+			}
+		} else {
+			files = append(files, e.Name())
+		}
+		if len(files) >= 30 {
+			break
+		}
+	}
+	return files
 }
 
 // ─── context filing ──────────────────────────────────────────────────────────
