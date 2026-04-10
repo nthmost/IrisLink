@@ -79,7 +79,8 @@ const (
 
 	focusCompose = 0
 	focusSidebar = 1
-	focusClaude  = 2
+	focusMode    = 2
+	focusClaude  = 3
 )
 
 func sendKey() string {
@@ -264,7 +265,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case msg.Type == tea.KeyTab:
 			skipCompose = true
-			m.focusArea = (m.focusArea + 1) % 3
+			m.focusArea = (m.focusArea + 1) % 4
 			if m.focusArea == focusCompose {
 				m.compose.Focus()
 				m.loginInput.Blur()
@@ -295,6 +296,17 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.expanded[item.path] = !m.expanded[item.path]
 				}
 			}
+
+		case m.focusArea == focusMode && msg.Type == tea.KeyEnter:
+			skipCompose = true
+			modes := []string{"relay", "mediate", "game-master"}
+			for i, mo := range modes {
+				if m.mode == mo {
+					m.mode = modes[(i+1)%len(modes)]
+					break
+				}
+			}
+			m.addSystem("mode: " + m.mode)
 
 		case m.focusArea == focusClaude && msg.Type == tea.KeyEnter:
 			skipCompose = true
@@ -380,7 +392,7 @@ func (m *tuiModel) sendMsg(text string) tea.Cmd {
 
 		if m.cfg.ClaudeAPIKey != "" {
 			if m.mode != "relay" {
-				if rewritten, err := claude.Mediate(m.cfg.ClaudeAPIKey, m.mode, text); err == nil && rewritten != "" {
+				if rewritten, err := claude.Mediate(m.cfg.ClaudeAPIKey, m.cfg.ClaudeModel, m.mode, text); err == nil && rewritten != "" {
 					finalText = rewritten
 				}
 			}
@@ -489,7 +501,7 @@ func (m tuiModel) View() string {
 	}
 	body := strings.Join(bodyParts, "\n")
 
-	hint := stylePrompt.Render("  " + sendKey() + " to send  •  tab: browse files  •  /help")
+	hint := stylePrompt.Render("  " + sendKey() + " to send  •  tab: compose/files/mode/claude  •  /help")
 	divider := styleDivider.Render(strings.Repeat("─", w))
 
 	return strings.Join([]string{header, heavyDiv, body, divider, hint}, "\n")
@@ -574,11 +586,16 @@ func (m tuiModel) renderClaudePanel(width int) []string {
 	}
 
 	// Context selection always uses haiku (fast/cheap).
-	// Mediation uses sonnet for both mediate and game-master modes.
+	// Mediation model is user-configurable; default is sonnet-4-6.
 	contextModel := "haiku-4-5"
 	mediateModel := "—"
 	if m.mode == "mediate" || m.mode == "game-master" {
-		mediateModel = "sonnet-4-6"
+		model := m.cfg.ClaudeModel
+		if model == "" {
+			model = "claude-sonnet-4-6"
+		}
+		// Show a short label: strip "claude-" prefix for display.
+		mediateModel = strings.TrimPrefix(model, "claude-")
 	}
 
 	label := "  ✓ claude"
@@ -601,16 +618,50 @@ func (m tuiModel) renderClaudePanel(width int) []string {
 	}
 }
 
+// renderModePanel renders the mode selector at the top of the sidebar.
+func (m tuiModel) renderModePanel(width int) []string {
+	inner := width - 1
+	focused := m.focusArea == focusMode
+
+	selectedBg := lipgloss.NewStyle().
+		Background(colDarkTeal).
+		Foreground(lipgloss.Color("#ffffff")).
+		Bold(true)
+
+	modes := []string{"relay", "mediate", "game-master"}
+	var modeLabel string
+	for _, mo := range modes {
+		if m.mode == mo {
+			modeLabel = "  ● " + mo
+		}
+	}
+	var row string
+	if focused {
+		row = selectedBg.Render(padToVisible(modeLabel, inner))
+	} else {
+		row = lipgloss.NewStyle().Foreground(colViolet).Bold(true).Render(modeLabel)
+	}
+
+	return []string{
+		styleSidebarHeader.Render(" mode"),
+		row,
+	}
+}
+
 // renderSidebar returns lines for the context sidebar (width = sidebarW).
 func (m tuiModel) renderSidebar(totalRows int) []string {
 	inner := sidebarW - 1
-
-	title := styleSidebarHeader.Render(" context")
 	sep := styleDivider.Render(" " + strings.Repeat("─", inner-1))
-	lines := []string{title, sep}
 
-	// Reserve last 8 rows for the claude panel.
-	treeRows := totalRows - 9
+	// Mode panel (2 lines) at top, then sep (1), then context title (1), then sep (1),
+	// then tree, then claude panel (8) at bottom.
+	// Fixed lines: 2 + 1 + 1 + 1 + 8 = 13.
+	modePanelLines := m.renderModePanel(sidebarW)
+	lines := append(modePanelLines, sep)
+	lines = append(lines, styleSidebarHeader.Render(" context"))
+	lines = append(lines, sep)
+
+	treeRows := totalRows - 13
 	if treeRows < 0 {
 		treeRows = 0
 	}
@@ -661,10 +712,7 @@ func (m tuiModel) renderSidebar(totalRows int) []string {
 	}
 
 	lines = append(lines, treeLines...)
-
-	// Append claude panel at the bottom.
-	claudeLines := m.renderClaudePanel(sidebarW)
-	lines = append(lines, claudeLines...)
+	lines = append(lines, m.renderClaudePanel(sidebarW)...)
 
 	for len(lines) < totalRows {
 		lines = append(lines, "")
@@ -802,13 +850,42 @@ func (m tuiModel) handleSlash(cmd string) (tea.Model, tea.Cmd) {
 			m.addSystem("usage: /mode relay|mediate|game-master")
 		}
 
+	case "/model":
+		if len(parts) > 1 {
+			resolved := resolveModel(parts[1])
+			m.cfg.ClaudeModel = resolved
+			state.WriteConfig(m.cfg) //nolint:errcheck
+			m.addSystem("model: " + resolved)
+		} else {
+			current := m.cfg.ClaudeModel
+			if current == "" {
+				current = "claude-sonnet-4-6 (default)"
+			}
+			m.addSystem("model: " + current + "  •  usage: /model haiku|sonnet|opus|<full-id>")
+		}
+
 	case "/help":
-		m.addSystem(sendKey() + ": send  •  tab: cycle focus (compose/files/claude)  •  /leave  •  /mode relay|mediate|game-master")
+		m.addSystem(sendKey() + ": send  •  tab: cycle focus  •  /leave  •  /mode relay|mediate|game-master  •  /model haiku|sonnet|opus")
 
 	default:
 		m.addSystem("unknown command: " + parts[0])
 	}
 	return m, nil
+}
+
+// resolveModel maps short aliases to full Anthropic model IDs.
+// If the input is already a full ID (contains a hyphen after "claude-"), it is returned as-is.
+func resolveModel(name string) string {
+	switch strings.ToLower(name) {
+	case "haiku":
+		return "claude-haiku-4-5-20251001"
+	case "sonnet":
+		return "claude-sonnet-4-6"
+	case "opus":
+		return "claude-opus-4-6"
+	default:
+		return name // pass through full model IDs unchanged
+	}
 }
 
 // ─── filesystem helpers ──────────────────────────────────────────────────────

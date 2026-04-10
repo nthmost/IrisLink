@@ -19,8 +19,8 @@ const (
 	apiVer        = "2023-06-01"
 	modelContext  = "claude-haiku-4-5-20251001"  // fast/cheap for context selection
 	modelMediate  = "claude-sonnet-4-6"           // mediate + game-master
-	maxCtx        = 50 * 1024                     // 50 KB total file budget
-	maxExc        = 500                            // max chars per excerpt in response
+	maxCtx        = 200 * 1024                    // 200 KB total file budget
+	maxFileSize   = 50 * 1024                     // 50 KB per individual file
 )
 
 // skipDirs are directories we never walk into when collecting context.
@@ -59,7 +59,7 @@ func callClaude(apiKey, prompt string) (string, error) {
 func callClaudeModel(apiKey, model, prompt string) (string, error) {
 	body, err := json.Marshal(apiRequest{
 		Model:     model,
-		MaxTokens: 1024,
+		MaxTokens: 8192,
 		Messages:  []apiMessage{{Role: "user", Content: prompt}},
 	})
 	if err != nil {
@@ -111,7 +111,7 @@ func collectFiles(dir string) map[string]string {
 		}
 		// skip large files quickly
 		info, err := d.Info()
-		if err != nil || info.Size() > int64(maxCtx) {
+		if err != nil || info.Size() > int64(maxFileSize) {
 			return nil
 		}
 		data, err := os.ReadFile(path)
@@ -146,23 +146,19 @@ func SelectContext(apiKey, msg, dir string) ([]transport.ContextBlock, error) {
 		return nil, nil
 	}
 
-	// Build a summary of available files for the prompt.
+	// Build full file contents for the prompt.
 	var sb strings.Builder
 	for rel, content := range files {
-		preview := content
-		if len(preview) > 300 {
-			preview = preview[:300] + "..."
-		}
-		fmt.Fprintf(&sb, "### %s\n%s\n\n", rel, preview)
+		fmt.Fprintf(&sb, "### %s\n%s\n\n", rel, content)
 	}
 
 	prompt := fmt.Sprintf(
 		`Given this message: '%s'
 
-Which of these files or excerpts are most relevant to include as context for the recipient? Return a JSON array of {"source": "<filename>", "content": "<excerpt>"} where content is the most relevant excerpt (max %d chars per file). Only include files that are genuinely relevant. Return an empty JSON array [] if nothing is relevant. Return ONLY the JSON array, no other text.
+Which of these files are most relevant to include as context for the recipient? Return a JSON array of {"source": "<filename>", "content": "<full file content>"} including the complete content of each relevant file. Only include files that are genuinely relevant. Return an empty JSON array [] if nothing is relevant. Return ONLY the JSON array, no other text.
 
 Files:
-%s`, msg, maxExc, sb.String())
+%s`, msg, sb.String())
 
 	text, err := callClaude(apiKey, prompt)
 	if err != nil {
@@ -187,9 +183,13 @@ Files:
 
 // Mediate rewrites msg for clarity (mediate mode) or adds GM narrative
 // (game-master mode). Returns original msg if mode is relay or no API key.
-func Mediate(apiKey, mode, msg string) (string, error) {
+// model may be "" to use the default mediation model.
+func Mediate(apiKey, model, mode, msg string) (string, error) {
 	if apiKey == "" || mode == "relay" {
 		return msg, nil
+	}
+	if model == "" {
+		model = modelMediate
 	}
 
 	var prompt string
@@ -206,5 +206,5 @@ func Mediate(apiKey, mode, msg string) (string, error) {
 		return msg, nil
 	}
 
-	return callClaudeModel(apiKey, modelMediate, prompt)
+	return callClaudeModel(apiKey, model, prompt)
 }

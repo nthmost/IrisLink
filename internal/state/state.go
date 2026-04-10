@@ -60,6 +60,7 @@ type Config struct {
 	Username     string `json:"broker_user"`
 	Password     string `json:"broker_pass"`
 	ClaudeAPIKey string `json:"claude_api_key,omitempty"`
+	ClaudeModel  string `json:"claude_model,omitempty"` // model for mediation; default: claude-sonnet-4-6
 }
 
 func defaultConfig() Config {
