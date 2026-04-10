@@ -36,11 +36,12 @@ type Client struct {
 	onMsg  func(Envelope)
 }
 
-// Connect establishes an MQTT v5 connection to brokerURL and subscribes to the room.
-func Connect(ctx context.Context, brokerURL, roomID, handle string, key [32]byte, onMsg func(Envelope)) (*Client, error) {
-	conn, err := net.DialTimeout("tcp", brokerURL, 10*time.Second)
+// Connect establishes an MQTT v5 connection to brokerAddr and subscribes to the room.
+// username and password may be empty for anonymous brokers.
+func Connect(ctx context.Context, brokerAddr, roomID, handle string, key [32]byte, onMsg func(Envelope), opts ...string) (*Client, error) {
+	conn, err := net.DialTimeout("tcp", brokerAddr, 10*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("cannot reach broker at %s: %w", brokerURL, err)
+		return nil, fmt.Errorf("cannot reach broker at %s: %w", brokerAddr, err)
 	}
 
 	c := &Client{roomID: roomID, key: key, handle: handle, onMsg: onMsg}
@@ -60,6 +61,14 @@ func Connect(ctx context.Context, brokerURL, roomID, handle string, key [32]byte
 		KeepAlive:  30,
 		ClientID:   uuid.New().String(), // random, never OTP-derived
 		CleanStart: true,
+	}
+	if len(opts) >= 1 && opts[0] != "" {
+		cp.Username = opts[0]
+		cp.UsernameFlag = true
+	}
+	if len(opts) >= 2 && opts[1] != "" {
+		cp.Password = []byte(opts[1])
+		cp.PasswordFlag = true
 	}
 
 	ca, err := pc.Connect(ctx, cp)

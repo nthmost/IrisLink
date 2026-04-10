@@ -97,3 +97,65 @@ func TestDeriveRoomID_distinct(t *testing.T) {
 		t.Fatal("different OTPs produced the same room_id")
 	}
 }
+
+func TestDeriveEncKey_deterministic(t *testing.T) {
+	a, err := DeriveEncKey("ABC123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := DeriveEncKey("ABC123")
+	if a != b {
+		t.Fatal("DeriveEncKey is not deterministic")
+	}
+}
+
+func TestDeriveEncKey_distinctFromRoomID(t *testing.T) {
+	key, _ := DeriveEncKey("ABC123")
+	roomID, _ := DeriveRoomID("ABC123")
+	// enc key and room_id must not share the same bytes
+	if string(key[:16]) == roomID[:16] {
+		t.Fatal("enc key and room_id must be distinct")
+	}
+}
+
+func TestSealOpen_roundtrip(t *testing.T) {
+	key, err := DeriveEncKey("TEST99")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := []byte(`{"sender":"alice","text":"hello","type":"message"}`)
+	sealed, err := Seal(plain, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sealed) < 24 {
+		t.Fatalf("sealed too short: %d bytes", len(sealed))
+	}
+	opened, err := Open(sealed, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(opened) != string(plain) {
+		t.Fatalf("roundtrip mismatch: got %q want %q", opened, plain)
+	}
+}
+
+func TestOpen_wrongKey(t *testing.T) {
+	key, _ := DeriveEncKey("AAAAA2")
+	wrongKey, _ := DeriveEncKey("AAAAA3")
+	sealed, _ := Seal([]byte("secret"), key)
+	if _, err := Open(sealed, wrongKey); err == nil {
+		t.Fatal("expected decryption failure with wrong key")
+	}
+}
+
+func TestSeal_uniqueNonces(t *testing.T) {
+	key, _ := DeriveEncKey("NONCE9")
+	plain := []byte("same message")
+	a, _ := Seal(plain, key)
+	b, _ := Seal(plain, key)
+	// First 24 bytes are the nonce — must differ
+	if string(a[:24]) == string(b[:24]) {
+		t.Fatal("Seal produced identical nonces")
+	}
+}

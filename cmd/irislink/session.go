@@ -77,7 +77,7 @@ func runJoin() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	client, err := transport.Connect(ctx, cfg.BrokerAddr(), roomID, handle, key, func(transport.Envelope) {})
+	client, err := transport.Connect(ctx, cfg.BrokerAddr(), roomID, handle, key, func(transport.Envelope) {}, cfg.Username, cfg.Password)
 	if err != nil {
 		fatalf("cannot connect to broker: %v\nCheck broker_url in ~/.irislink/config.json", err)
 	}
@@ -117,7 +117,7 @@ func runLeave() {
 	if err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if client, err := transport.Connect(ctx, cfg.BrokerAddr(), p.RoomID, meta.Handle, key, func(transport.Envelope) {}); err == nil {
+		if client, err := transport.Connect(ctx, cfg.BrokerAddr(), p.RoomID, meta.Handle, key, func(transport.Envelope) {}, cfg.Username, cfg.Password); err == nil {
 			client.Publish(ctx, transport.Envelope{Type: "presence", Text: "left"})
 			client.Disconnect(ctx)
 		}
@@ -190,7 +190,7 @@ func runPoll() {
 				f.WriteString(line)
 				f.Close()
 			}
-		})
+		}, cfg.Username, cfg.Password)
 		if err != nil {
 			time.Sleep(5 * time.Second)
 			continue
