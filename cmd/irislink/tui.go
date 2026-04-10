@@ -264,7 +264,7 @@ func (m tuiModel) View() string {
 		w = 80
 	}
 
-	otpStyle := lipgloss.NewStyle().Bold(true).Foreground(colPink)
+	otpStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff"))
 	header := styleHeader.Render("IRISLINK") +
 		"  " + otpStyle.Render(m.otp) +
 		"  " + styleHeaderDim.Render(m.mode) +
@@ -398,8 +398,10 @@ func (m tuiModel) renderWaitingPopover(header, heavyDiv string, w int) string {
 		boxW = w - 4
 	}
 
-	otpBig := lipgloss.NewStyle().Bold(true).Foreground(colPink).
-		Width(boxW).Align(lipgloss.Center).Render(m.otp)
+	// Space out the characters and use bright white for legibility.
+	spaced := strings.Join(strings.Split(m.otp, ""), "  ")
+	otpBig := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).
+		Width(boxW).Align(lipgloss.Center).Render(spaced)
 	label := lipgloss.NewStyle().Foreground(colDimBlue).
 		Width(boxW).Align(lipgloss.Center).Render("share this code with your partner")
 	waiting := lipgloss.NewStyle().Foreground(colCyan).Italic(true).
