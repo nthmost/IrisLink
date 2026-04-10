@@ -51,15 +51,24 @@ go install github.com/nthmost/IrisLink/cmd/irislink@latest
 
 ```bash
 mkdir -p ~/.claude/skills/irislink
-curl -fsSL https://raw.githubusercontent.com/nthmost/IrisLink/main/irislink/irislink.md \
+curl -fsSL https://raw.githubusercontent.com/nthmost/IrisLink/main/irislink/SKILL.md \
   -o ~/.claude/skills/irislink/SKILL.md
 ```
 
-Make sure `$(go env GOPATH)/bin` is on your `PATH`:
+Make sure `~/go/bin` is on your `PATH` (add to `~/.zshrc` or `~/.bashrc`):
 
 ```bash
-export PATH="$(go env GOPATH)/bin:$PATH"
+export PATH="$HOME/go/bin:$PATH"
 ```
+
+**No Go on the target machine?** Cross-compile from a machine that has it:
+
+```bash
+GOOS=linux GOARCH=amd64 go build -o irislink-linux ./cmd/irislink
+scp irislink-linux user@host:~/bin/irislink
+```
+
+Common targets: `GOOS=linux GOARCH=arm64` (Raspberry Pi, Apple Silicon Linux), `GOOS=darwin GOARCH=arm64` (Apple Silicon Mac).
 
 ## Quick start — two machines
 
