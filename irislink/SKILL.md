@@ -1,125 +1,351 @@
 ---
 name: irislink
-description: Use /irislink to pair two Claude Code sessions with a six-character OTP and mediate their chat through IrisLink
+description: Use /irislink to pair two Claude Code sessions via a six-character OTP and relay or mediate messages between them through IrisLink
 ---
 
-# IrisLink Skill Specification
+# IrisLink Skill
 
-IrisLink links two Claude Code instances through a short-lived room keyed by a six-character one-time pad. Each participant runs `/irislink` inside their Claude session and loads the IrisLink lobby web app. The skill coordinates OTP validation, room state, and the Claude-to-Claude mediation loop.
+IrisLink pairs two Claude Code sessions through a short-lived room keyed by a six-character one-time pad.
 
-## Invocation
+All operations go through the `irislink` binary. If `irislink` is not on PATH, install it:
 
-- `/irislink help` — show summary + available subcommands
-- `/irislink create [mode]` — mint a new OTP code and host a room until a partner joins (default mode `relay`)
-- `/irislink join <OTP> [mode]` — join an existing room created by another participant
-- `/irislink mode <relay|mediate|game-master>` — switch mediation strategy for the active room
-- `/irislink leave` — disengage, revoke tokens, and delete the local connector
+```bash
+go install github.com/nthmost/IrisLink/cmd/irislink@latest
+# or download a release binary to ~/bin/irislink
+```
 
-Arguments are case-insensitive. OTPs must be six characters drawn from `A-Z2-7`.
+## State Files
 
-## Room Lifecycle
+All state lives under `~/.irislink/`:
 
-1. **Code minting** — `/irislink create` generates a random OTP, shows it to the user, and copies it to the clipboard. The skill derives a room ID using HKDF:
+| File | Contents |
+|------|---------|
+| `config.json` | `{"connector_url": "http://localhost:8357"}` — optional, overrides default port |
+| `rooms/pending.json` | Active room `{"otp": "...", "room_id": "..."}` |
+| `rooms/<otp>.log` | Incoming messages |
+| `rooms/<otp>.pid` | Background poller PID |
+| `rooms/<otp>.meta` | `{"handle": "...", "mode": "relay", "cursor": 0}` |
 
-   ```text
-   pad = OTP uppercased (e.g., J9K4Z2)
-   salt = "irislink:v0"
-   info = "irislink-room"
-   room_id = hex(HKDF-SHA256(pad, salt, info, 16 bytes))
+## Prerequisites
+
+Check connector:
+```bash
+curl -s $(irislink pending connector)/status
+```
+
+If it fails, start it:
+```bash
+irislink proxy &
+```
+
+Check rendezvous server:
+```bash
+curl -s http://localhost:4173/rooms/AAAAAA 2>/dev/null | grep -q error && echo "server up" || echo "server down"
+```
+
+If down:
+```bash
+irislink server &
+```
+
+## Seamless Relay Mode
+
+Once a session is active, register the UserPromptSubmit hook so messages are relayed automatically without any `/irislink` prefix.
+
+**Register (on create/join):**
+
+```bash
+python3 - << 'EOF'
+import json, pathlib
+p = pathlib.Path.home() / ".claude" / "settings.json"
+s = json.loads(p.read_text()) if p.exists() else {}
+entry = {"matcher": "", "hooks": [{"type": "command", "command": "irislink hook"}]}
+ups = s.setdefault("hooks", {}).setdefault("UserPromptSubmit", [])
+if not any("irislink hook" in str(h) for h in ups):
+    ups.append(entry)
+p.write_text(json.dumps(s, indent=2))
+print("hook registered")
+EOF
+```
+
+**Deregister (on leave):**
+
+```bash
+python3 - << 'EOF'
+import json, pathlib
+p = pathlib.Path.home() / ".claude" / "settings.json"
+s = json.loads(p.read_text())
+ups = s.get("hooks", {}).get("UserPromptSubmit", [])
+s["hooks"]["UserPromptSubmit"] = [h for h in ups if "irislink hook" not in str(h)]
+p.write_text(json.dumps(s, indent=2))
+print("hook removed")
+EOF
+```
+
+## Subcommands
+
+---
+
+### `/irislink` or `/irislink help`
+
+```bash
+cat ~/.irislink/rooms/pending.json 2>/dev/null
+irislink pending connector
+```
+
+If a room is active, show OTP, phase, TTL, participants, mode.
+If not, show available subcommands.
+
+---
+
+### `/irislink create [mode]`
+
+Default mode: `relay`. Valid: `relay`, `mediate`, `game-master`.
+
+1. Ask the user for their handle (default: `operator`).
+
+2. Create the room:
+   ```bash
+   curl -s -X POST http://localhost:4173/rooms \
+     -H "Content-Type: application/json" \
+     -d '{"handle": "<handle>"}'
    ```
 
-   The skill writes `{ "otp": "J9K4Z2", "room_id": "1f2e..." }` to `~/.irislink/rooms/pending.json` so the lobby app can poll it.
+3. Write pending.json (use OTP from server response):
+   ```bash
+   OTP=<otp_from_response>
+   irislink pending write $OTP $(irislink room-id $OTP)
+   ```
 
-2. **Lobby coordination** — The IrisLink lobby page (future `web/` app) polls `http://localhost:8357/rooms/pending.json` (exposed by the connector) to display the OTP. Once a partner enters the same code, both sides become `joined` inside the rendezvous API.
+4. Write session metadata:
+   ```bash
+   mkdir -p ~/.irislink/rooms
+   printf '{"handle":"%s","mode":"%s","cursor":0}' "<handle>" "<mode>" \
+     > ~/.irislink/rooms/<OTP>.meta
+   ```
 
-3. **State transitions** — Rooms move through `waiting → joined → active → closed`. TTL defaults to fifteen minutes; unused codes expire after five minutes and cannot rejoin after being marked `closed`.
+5. Display prominently:
+   ```
+   ╔══════════════════════╗
+   ║  IrisLink: ABC123    ║
+   ║  mode: relay         ║
+   ╚══════════════════════╝
+   Share this code with your partner.
+   ```
 
-4. **Cleanup** — `/irislink leave` deletes any cached room files (`~/.irislink/rooms/<room_id>.json`) and sends `DELETE /rooms/<room_id>` to the rendezvous API.
+6. Start the poller (see **Polling Loop**).
 
-## Rendezvous API (draft)
+7. Register the hook (see **Seamless Relay Mode**).
 
-Set `IRISLINK_BASE_URL` (default `https://irislink.naomimost.com/api`). The skill uses the following endpoints:
+8. Tell the user: "Waiting for partner. Once they join, just type — messages relay automatically."
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `POST` | `/rooms` | Create room, returns `room_id`, `ws_url`, `secret` |
-| `POST` | `/rooms/<room_id>/join` | Join existing room, returns peer metadata |
-| `POST` | `/rooms/<room_id>/events` | Push message envelopes |
-| `GET`  | `/rooms/<room_id>/events?since=<cursor>` | Poll for new envelopes if WS unavailable |
-| `DELETE` | `/rooms/<room_id>` | Close room immediately |
+---
 
-All requests include `X-IrisLink-Signature: base64(HMAC-SHA256(body, secret))` where `secret` is derived from HKDF using `info = "irislink-signature"`.
+### `/irislink join <OTP> [mode]`
 
-## Message Envelopes
+Default mode: `relay`.
 
-Each envelope is structured JSON so Claude can reason about origin, mode, and authenticity:
+1. Validate OTP — 6 chars from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`. Uppercase it.
 
-```json
-{
-  "room_id": "1f2e3c4a5b6d",
-  "envelope_id": "uuid",
-  "timestamp": 1722891241,
-  "sender": {
-    "role": "user" | "assistant" | "system",
-    "handle": "call-sign"
-  },
-  "mode": "relay" | "mediate" | "game-master",
-  "payload": {
-    "type": "chat" | "status" | "control",
-    "text": "original message text",
-    "metadata": {
-      "language": "en",
-      "annotations": []
-    }
-  },
-  "signatures": {
-    "browser": "base64mac",
-    "claude": "base64mac"
-  }
-}
+2. Ask handle (default: `operator`).
+
+3. Join:
+   ```bash
+   curl -s -X POST http://localhost:4173/rooms/<OTP>/join \
+     -H "Content-Type: application/json" \
+     -d '{"handle": "<handle>"}'
+   ```
+   - 404 → code doesn't exist or expired
+   - 409 → room full
+   - 410 → expired
+
+4. Write pending.json:
+   ```bash
+   irislink pending write <OTP> $(irislink room-id <OTP>)
+   ```
+
+5. Write metadata:
+   ```bash
+   mkdir -p ~/.irislink/rooms
+   printf '{"handle":"%s","mode":"%s","cursor":0}' "<handle>" "<mode>" \
+     > ~/.irislink/rooms/<OTP>.meta
+   ```
+
+6. Show room state from join response, then display:
+
+   ```
+    ___      _     _     _       _
+   |_ _|_ __(_)___| |   (_)_ __ | | __
+    | || '__| / __| |   | | '_ \| |/ /
+    | || |  | \__ \ |___| | | | |   <
+   |___|_|  |_|___/_____|_|_| |_|_|\_\
+
+   connected  •  room: <OTP>  •  mode: <mode>
+   partner: <handle>
+   ```
+
+7. Start the poller.
+
+8. Register the hook.
+
+9. Tell the user: "Joined. Just type your messages. `/irislink leave` when done."
+
+---
+
+### `/irislink send <text>`
+
+```bash
+OTP=$(python3 -c "import json; print(json.load(open('/Users/nthmost/.irislink/rooms/pending.json'))['otp'])")
+HANDLE=$(python3 -c "import json; print(json.load(open(f'/Users/nthmost/.irislink/rooms/{\"$OTP\"}.meta'))['handle'])")
+MODE=$(python3 -c "import json; print(json.load(open(f'/Users/nthmost/.irislink/rooms/{\"$OTP\"}.meta'))['mode'])")
+CONNECTOR=$(irislink pending connector)
 ```
+
+If mode is not `relay`:
+```bash
+irislink mediate $MODE "<text>"
+```
+Show both versions, confirm.
+
+Send:
+```bash
+irislink send $CONNECTOR $OTP $HANDLE "<text>"
+```
+
+---
+
+### `/irislink mode <relay|mediate|game-master>`
+
+```bash
+OTP=$(python3 -c "import json; print(json.load(open('/Users/nthmost/.irislink/rooms/pending.json'))['otp'])")
+curl -s -X POST http://localhost:4173/rooms/$OTP/mode \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "<mode>"}'
+# Update meta
+python3 -c "
+import json, pathlib
+p = pathlib.Path('/Users/nthmost/.irislink/rooms/$OTP.meta')
+d = json.loads(p.read_text()); d['mode'] = '<mode>'; p.write_text(json.dumps(d))
+"
+```
+
+---
+
+### `/irislink status`
+
+```bash
+OTP=$(python3 -c "import json; print(json.load(open('/Users/nthmost/.irislink/rooms/pending.json'))['otp'])")
+CONNECTOR=$(irislink pending connector)
+irislink events $CONNECTOR $OTP 0
+tail -10 ~/.irislink/rooms/$OTP.log 2>/dev/null || echo "(no messages yet)"
+```
+
+---
+
+### `/irislink leave`
+
+```bash
+OTP=$(python3 -c "import json; print(json.load(open('/Users/nthmost/.irislink/rooms/pending.json'))['otp'])" 2>/dev/null)
+curl -s -X DELETE http://localhost:4173/rooms/$OTP
+kill $(cat ~/.irislink/rooms/$OTP.pid 2>/dev/null) 2>/dev/null; true
+irislink pending clear
+rm -f ~/.irislink/rooms/$OTP.pid ~/.irislink/rooms/$OTP.meta
+```
+
+Deregister the hook (see **Seamless Relay Mode**).
+
+Confirm: "Left room $OTP. Log at ~/.irislink/rooms/$OTP.log"
+
+---
+
+## Polling Loop
+
+```bash
+OTP=<otp>
+HANDLE=<handle>
+CONNECTOR=$(irislink pending connector)
+LOG=~/.irislink/rooms/${OTP}.log
+mkdir -p ~/.irislink/rooms
+
+cat > /tmp/irislink_poll_${OTP}.sh << POLL
+#!/usr/bin/env bash
+OTP="$OTP"
+HANDLE="$HANDLE"
+CONNECTOR="$CONNECTOR"
+LOG="$LOG"
+CURSOR=0
+PREV_PHASE=""
+
+while true; do
+    RESULT=\$(irislink events \$CONNECTOR \$OTP \$CURSOR 2>/dev/null)
+    [ -z "\$RESULT" ] && sleep 2 && continue
+
+    PHASE=\$(echo "\$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('phase',''))" 2>/dev/null)
+    NEXT=\$(echo "\$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('next',0))" 2>/dev/null)
+
+    if [ "\$PHASE" = "active" ] && [ "\$PREV_PHASE" != "active" ]; then
+        echo ""
+        echo " ___      _     _     _       _    "
+        echo "|_ _|_ __(_)___| |   (_)_ __ | | __"
+        echo " | || '__| / __| |   | | '_ \| |/ /"
+        echo " | || |  | \__ \ |___| | | | |   < "
+        echo "|___|_|  |_|___/_____|_|_| |_|_|\_\\"
+        echo ""
+        echo "connected  •  room: $OTP"
+        echo "partner has joined — just type!"
+        echo ""
+    fi
+    PREV_PHASE=\$PHASE
+
+    echo "\$RESULT" | python3 -c "
+import sys, json, datetime
+d = json.load(sys.stdin)
+for e in d.get('events', []):
+    if e.get('sender') != '$HANDLE':
+        ts = datetime.datetime.fromtimestamp(e['timestamp']/1000).strftime('%H:%M:%S')
+        print(f'[{ts}] {e[\"sender\"]}: {e[\"text\"]}')
+" >> "\$LOG" 2>/dev/null
+
+    [ -n "\$NEXT" ] && [ "\$NEXT" != "0" ] && CURSOR=\$NEXT
+    [ "\$PHASE" = "closed" ] && echo "[room closed]" >> "\$LOG" && break
+    sleep 2
+done
+POLL
+
+chmod +x /tmp/irislink_poll_${OTP}.sh
+/tmp/irislink_poll_${OTP}.sh &
+echo $! > ~/.irislink/rooms/${OTP}.pid
+echo "Poller started."
+```
+
+---
 
 ## Mediation Modes
 
-- **relay** — minimal pass-through. Claude simply ensures formatting is consistent (`markdown`, trimmed context) and prevents obvious prompt injection.
-- **mediate** — Claude rewrites each outbound message per the partner's chosen persona (translator, tone shifter, summarizer). Claude emits both the rewritten message (for the peer) and a short narrator note (for transparency).
-- **game-master** — Claude inserts system prompts that direct collaborative play (e.g., puzzle hints, improvisational prompts). Additional `control` envelopes allow Claude to pause/resume human input or inject timed events.
+| Mode | Behaviour |
+|------|-----------|
+| `relay` | Pass-through, no LLM |
+| `mediate` | Rewrites for clarity via `loki/qwen-coder-14b` |
+| `game-master` | Adds GM narrative via `loki/qwen3-coder-30b` |
 
-Users can switch modes mid-session via `/irislink mode X`. The skill broadcasts a `control` envelope to notify the peer.
+Call: `irislink mediate <mode> "<text>"`
 
-## Local Connector Expectations
+---
 
-The skill assumes a lightweight connector listening on `localhost:8357` with:
+## OTP Alphabet
 
-- `GET /status` → returns current connector version and whether Claude is attached.
-- `POST /message` → body `{"room_id":"...","payload":{...}}` pushes outbound envelopes.
-- `GET /events?since=<cursor>` → streams inbound envelopes for the Claude session.
-- `GET /rooms/pending.json` → reveals OTP + room metadata for the lobby page (read-only).
+Valid: `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (no 0, 1, I, O)
+Always uppercase before use.
 
-If the connector is missing, the skill prompts the user to run `python connectors/claude_proxy.py --listen 8357` (future script) and retry.
+---
 
-## Conversation Loop
+## Error Reference
 
-1. User runs `/irislink join ABC123`.
-2. Skill validates OTP format and tries to `POST /rooms/<room_id>/join`.
-3. On success, skill subscribes to connector events and starts a watch loop:
-   - Poll connector every 2s (or open SSE) for new envelopes.
-   - For each inbound envelope, display to user (with mediator's note) and append to local transcript.
-4. When user sends a message in Claude, intercept via the skill (structured mode) instead of default chat completion:
-   - Ask user for message text if not already provided.
-   - Build envelope, include `payload.text`, run chosen mediation template, send via connector `POST /message`.
-   - Echo sanitized text locally.
-5. Continue until `/irislink leave`, TTL expiry, or partner disconnect.
-
-## Safety Rails
-
-- OTPs expire after five minutes if no partner joins; warn user and auto-mint a new code.
-- Close the room if either client detects conflicting OTP reuse (prevents hijacking).
-- Strip personally identifiable info before writing transcripts to disk; transcripts live in `~/.irislink/history/<room_id>.md`.
-- Provide `status` summary when `/irislink` is invoked without subcommand: show active room, code, partner handle, current mode, TTL remaining.
-
-## TODO
-
-- Implement the connector stub plus a mock rendezvous service for local testing.
-- Add a test harness that simulates two Claude sessions exchanging envelopes.
-- Document WebSocket handshake and optional libsodium E2E encryption for peers who do not trust the rendezvous service.
+| Situation | Fix |
+|-----------|-----|
+| `irislink: command not found` | `go install github.com/nthmost/IrisLink/cmd/irislink@latest` |
+| Connector not responding | `irislink proxy &` |
+| Server not responding | `irislink server &` |
+| 404 on join | Code expired — ask partner for a new one |
+| 409 on join | Room full |
+| 410 anywhere | Room expired — leave and start fresh |

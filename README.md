@@ -50,8 +50,9 @@ go install github.com/nthmost/IrisLink/cmd/irislink@latest
 **Install the skill:**
 
 ```bash
+mkdir -p ~/.claude/skills/irislink
 curl -fsSL https://raw.githubusercontent.com/nthmost/IrisLink/main/irislink/irislink.md \
-  -o ~/.claude/skills/irislink.md
+  -o ~/.claude/skills/irislink/SKILL.md
 ```
 
 Make sure `$(go env GOPATH)/bin` is on your `PATH`:
