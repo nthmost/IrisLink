@@ -353,24 +353,37 @@ func (m tuiModel) View() string {
 
 // renderSidebar returns lines for the context sidebar (width = sidebarW).
 func (m tuiModel) renderSidebar(totalRows int) []string {
-	inner := sidebarW - 1 // leave 1 char padding after │
+	inner := sidebarW - 1
 
 	title := styleSidebarHeader.Render(" context")
 	sep := styleDivider.Render(" " + strings.Repeat("─", inner-1))
-
 	lines := []string{title, sep}
 
-	files := cwdFiles(m.cwd)
-	if len(files) == 0 {
+	entries := cwdEntries(m.cwd)
+	if len(entries) == 0 {
 		lines = append(lines, styleSidebarHint.Render(" (empty dir)"))
 	}
-	for _, f := range files {
-		label := " " + f
-		if len(label) > inner {
-			label = " …" + label[len(label)-(inner-2):]
+	for _, e := range entries {
+		label := " " + e.label
+		if lipgloss.Width(label) > inner {
+			// truncate from left so the end (file count) stays visible
+			label = " …" + e.label[len(e.label)-(inner-3):]
 		}
-		if m.sentFiles[f] {
+		// Highlight if this dir/file had context sent from it.
+		sent := m.sentFiles[e.path]
+		if !sent && e.isDir {
+			// check if any sent file is inside this dir
+			for k := range m.sentFiles {
+				if strings.HasPrefix(k, e.path+"/") {
+					sent = true
+					break
+				}
+			}
+		}
+		if sent {
 			lines = append(lines, styleSidebarSent.Render(label))
+		} else if e.isDir {
+			lines = append(lines, styleSidebarHeader.Render(label))
 		} else {
 			lines = append(lines, styleSidebarFile.Render(label))
 		}
@@ -382,7 +395,6 @@ func (m tuiModel) renderSidebar(totalRows int) []string {
 		lines = append(lines, styleSidebarHint.Render(" auto-context"))
 	}
 
-	// Pad to totalRows.
 	for len(lines) < totalRows {
 		lines = append(lines, "")
 	}
@@ -514,33 +526,43 @@ var skipDirs = map[string]bool{
 	".cache": true, "__pycache__": true, "irislink-context": true,
 }
 
-// cwdFiles returns relative file paths up to 2 levels deep, skipping noise.
-func cwdFiles(root string) []string {
-	var files []string
-	entries, err := os.ReadDir(root)
+// cwdEntry is one line in the sidebar: either a dir (with count) or a file.
+type cwdEntry struct {
+	label string
+	isDir bool
+	path  string // relative path, for sentFiles lookup
+}
+
+// cwdEntries returns a compact directory summary for the sidebar.
+// Directories show as "dirname/  (N)" and loose root-level files show by name.
+func cwdEntries(root string) []cwdEntry {
+	top, err := os.ReadDir(root)
 	if err != nil {
 		return nil
 	}
-	for _, e := range entries {
+	var out []cwdEntry
+	for _, e := range top {
 		if strings.HasPrefix(e.Name(), ".") || skipDirs[e.Name()] {
 			continue
 		}
 		if e.IsDir() {
 			sub, _ := os.ReadDir(filepath.Join(root, e.Name()))
-			for _, se := range sub {
-				if strings.HasPrefix(se.Name(), ".") || se.IsDir() {
-					continue
+			n := 0
+			for _, s := range sub {
+				if !strings.HasPrefix(s.Name(), ".") && !s.IsDir() {
+					n++
 				}
-				files = append(files, e.Name()+"/"+se.Name())
 			}
+			label := fmt.Sprintf("%s/ (%d)", e.Name(), n)
+			out = append(out, cwdEntry{label: label, isDir: true, path: e.Name()})
 		} else {
-			files = append(files, e.Name())
+			out = append(out, cwdEntry{label: e.Name(), isDir: false, path: e.Name()})
 		}
-		if len(files) >= 30 {
+		if len(out) >= 20 {
 			break
 		}
 	}
-	return files
+	return out
 }
 
 // ─── context filing ──────────────────────────────────────────────────────────
