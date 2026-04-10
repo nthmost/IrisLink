@@ -56,13 +56,26 @@ func ClearPending() error {
 
 // Config represents ~/.irislink/config.json
 type Config struct {
-	BrokerURL string `json:"broker_url"`
-	Username  string `json:"broker_user"`
-	Password  string `json:"broker_pass"`
+	BrokerURL    string `json:"broker_url"`
+	Username     string `json:"broker_user"`
+	Password     string `json:"broker_pass"`
+	ClaudeAPIKey string `json:"claude_api_key,omitempty"`
 }
 
 func defaultConfig() Config {
 	return Config{BrokerURL: "mqtt://localhost:1883"}
+}
+
+// WriteConfig persists a Config back to ~/.irislink/config.json.
+func WriteConfig(c Config) error {
+	if err := os.MkdirAll(irisDir(), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(irisDir(), "config.json"), data, 0o644)
 }
 
 func ReadConfig() Config {

@@ -14,15 +14,10 @@ go install github.com/nthmost/IrisLink/cmd/irislink@latest
 
 ## Prerequisites
 
-Check connector and server are running:
-```bash
-curl -s $(irislink pending connector)/status
-```
+IrisLink requires no server. Just a `~/.irislink/config.json` pointing at an MQTT broker:
 
-If not:
-```bash
-irislink server &   # rendezvous server, port 4173
-irislink proxy &    # connector proxy, port 8357
+```json
+{"broker_url": "mqtt://homeassistant.local:1883", "broker_user": "irislink", "broker_pass": "..."}
 ```
 
 ---

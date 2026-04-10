@@ -27,8 +27,6 @@ func main() {
 		runJoin()
 	case "leave":
 		runLeave()
-	case "poll":
-		runPoll()
 	case "otp":
 		runOTP()
 	case "room-id":
@@ -39,10 +37,8 @@ func main() {
 		runSend()
 	case "mediate":
 		runMediate()
-	case "hook":
-		runHook()
 	case "version":
-		fmt.Println("irislink 0.1.0")
+		fmt.Println("irislink 0.2.0")
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		usage()
@@ -51,12 +47,18 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `irislink — Claude-to-Claude pairing tool
+	fmt.Fprintln(os.Stderr, `irislink — peer-to-peer encrypted chat TUI
 
 Session commands:
-  create <handle> [mode]       Create room, register hook, start poller
-  join <otp> <handle> [mode]   Join room, register hook, start poller
-  leave                        Close room, kill poller, deregister hook
+  create <handle> [mode]       Create room, launch TUI
+  join <otp> <handle> [mode]   Join room, launch TUI
+  leave                        Disconnect from active room (non-TUI)
+
+In-TUI slash commands:
+  /login <api-key>             Store Claude API key for context/mediation
+  /mode relay|mediate|game-master
+  /leave                       Disconnect and quit
+  /help                        List commands
 
 Low-level / debug:
   otp                          Generate a random 6-char OTP
@@ -65,13 +67,13 @@ Low-level / debug:
   pending clear                Remove pending.json
   send <otp> <text>            Publish a message to the active room
   mediate <mode> <text>        Transform text via LiteLLM (relay|mediate|game-master)
-  hook                         UserPromptSubmit hook (reads JSON stdin)
   version                      Print version
 
 Config (~/.irislink/config.json):
-  broker_url   MQTT broker URL (default: mqtt://localhost:1883)
-  broker_user  Optional broker username
-  broker_pass  Optional broker password`)
+  broker_url      MQTT broker URL (default: mqtt://localhost:1883)
+  broker_user     Optional broker username
+  broker_pass     Optional broker password
+  claude_api_key  Anthropic API key (set via /login in TUI)`)
 }
 
 // --- otp ---
@@ -208,71 +210,7 @@ func runMediate() {
 	fmt.Println(result.Choices[0].Message.Content)
 }
 
-// --- hook ---
-
-func runHook() {
-	var event struct {
-		Prompt string `json:"prompt"`
-	}
-	if err := json.NewDecoder(os.Stdin).Decode(&event); err != nil {
-		os.Exit(0)
-	}
-
-	if strings.HasPrefix(strings.TrimSpace(event.Prompt), "/irislink") {
-		os.Exit(0)
-	}
-
-	p, err := state.ReadPending()
-	if err != nil || p == nil || p.OTP == "" {
-		os.Exit(0)
-	}
-
-	meta := state.ReadMeta(p.OTP)
-	inbound := readLog(p.OTP, 5)
-
-	additionalContext := fmt.Sprintf(`## Active IrisLink Session
-
-Your handle: %s  •  mode: %s  •  broker: %s
-
-**Before responding, relay this message to the IrisLink room:**
-
-%s
-
-Steps:
-1. If mode is not relay: irislink mediate %s %q — show result and confirm.
-2. Send: irislink send %s %q
-3. Recent inbound messages (also in ~/.irislink/rooms/%s.log):
-%s
-
-After relaying, respond normally. /irislink leave to exit.`,
-		meta.Handle, meta.Mode, state.ReadConfig().BrokerURL,
-		event.Prompt,
-		meta.Mode, event.Prompt,
-		p.OTP, event.Prompt,
-		p.OTP,
-		inbound,
-	)
-
-	json.NewEncoder(os.Stdout).Encode(map[string]string{"additionalContext": additionalContext})
-}
-
 // --- helpers ---
-
-func readLog(otp string, n int) string {
-	home, _ := os.UserHomeDir()
-	data, err := os.ReadFile(home + "/.irislink/rooms/" + otp + ".log")
-	if err != nil {
-		return "(none yet)"
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
-	}
-	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
-		return "(none yet)"
-	}
-	return strings.Join(lines, "\n")
-}
 
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {

@@ -19,12 +19,19 @@ const (
 	topicControl  = "irislink/%s/control"
 )
 
+// ContextBlock carries a file excerpt attached to an outgoing envelope.
+type ContextBlock struct {
+	Source  string `json:"source"`
+	Content string `json:"content"`
+}
+
 // Envelope is the cleartext payload that gets encrypted on the wire.
 type Envelope struct {
-	Sender    string `json:"sender"`
-	Text      string `json:"text"`
-	Timestamp int64  `json:"timestamp"`
-	Type      string `json:"type"` // "message", "presence", "control"
+	Sender    string         `json:"sender"`
+	Text      string         `json:"text"`
+	Timestamp int64          `json:"timestamp"`
+	Type      string         `json:"type"` // "message", "presence", "control"
+	Context   []ContextBlock `json:"context,omitempty"`
 }
 
 // Client is an IrisLink MQTT session for one room.

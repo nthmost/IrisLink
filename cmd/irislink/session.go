@@ -2,14 +2,13 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	ilcrypto "github.com/nthmost/IrisLink/internal/crypto"
 	"github.com/nthmost/IrisLink/internal/state"
@@ -42,14 +41,30 @@ func runCreate() {
 	if err := state.WriteMeta(otp, state.Meta{Handle: handle, Mode: mode}); err != nil {
 		fatal(err)
 	}
-	if err := registerHook(); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not register hook: %v\n", err)
-	}
-	if err := startPoller(otp, handle, mode); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not start poller: %v\n", err)
+
+	cfg := state.ReadConfig()
+	key, err := ilcrypto.DeriveEncKey(otp)
+	if err != nil {
+		fatal(err)
 	}
 
-	fmt.Printf("\n╔══════════════════════╗\n║  IrisLink: %s   ║\n║  mode: %-13s║\n╚══════════════════════╝\n\nShare this code with your partner.\nWaiting for them to join — once connected, just type.\n\n", otp, mode)
+	incoming := make(chan transport.Envelope, 32)
+	ctx := context.Background()
+	client, err := transport.Connect(ctx, cfg.BrokerAddr(), roomID, handle, key, func(env transport.Envelope) {
+		incoming <- env
+	}, cfg.Username, cfg.Password)
+	if err != nil {
+		fatalf("cannot connect to broker: %v\nCheck broker_url in ~/.irislink/config.json", err)
+	}
+
+	fmt.Printf("\n╔══════════════════════╗\n║  IrisLink: %s   ║\n║  mode: %-13s║\n╚══════════════════════╝\n\nShare this code with your partner.\n\n", otp, mode)
+
+	runTUIWithClient(otp, handle, mode, client, incoming, cfg)
+
+	client.Disconnect(context.Background())
+	state.ClearPending()
+	home, _ := os.UserHomeDir()
+	os.Remove(filepath.Join(home, ".irislink", "rooms", otp+".meta"))
 }
 
 // runJoin: irislink join <otp> <handle> [mode]
@@ -69,21 +84,25 @@ func runJoin() {
 		fatal(err)
 	}
 
-	// Verify broker is reachable before writing state
 	cfg := state.ReadConfig()
 	key, err := ilcrypto.DeriveEncKey(otp)
 	if err != nil {
 		fatal(err)
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	client, err := transport.Connect(ctx, cfg.BrokerAddr(), roomID, handle, key, func(transport.Envelope) {}, cfg.Username, cfg.Password)
+
+	incoming := make(chan transport.Envelope, 32)
+	client, err := transport.Connect(ctx, cfg.BrokerAddr(), roomID, handle, key, func(env transport.Envelope) {
+		incoming <- env
+	}, cfg.Username, cfg.Password)
 	if err != nil {
 		fatalf("cannot connect to broker: %v\nCheck broker_url in ~/.irislink/config.json", err)
 	}
-	// Publish presence
-	client.Publish(ctx, transport.Envelope{Type: "presence", Text: "joined"})
-	client.Disconnect(ctx)
+
+	// Publish presence.
+	client.Publish(context.Background(), transport.Envelope{Type: "presence", Text: "joined"}) //nolint:errcheck
 
 	if err := state.WritePending(otp, roomID); err != nil {
 		fatal(err)
@@ -91,17 +110,18 @@ func runJoin() {
 	if err := state.WriteMeta(otp, state.Meta{Handle: handle, Mode: mode}); err != nil {
 		fatal(err)
 	}
-	if err := registerHook(); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not register hook: %v\n", err)
-	}
-	if err := startPoller(otp, handle, mode); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not start poller: %v\n", err)
-	}
 
-	fmt.Printf("\n ___      _     _     _       _\n|_ _|_ __(_)___| |   (_)_ __ | | __\n | || '__| / __| |   | | '_ \\| |/ /\n | || |  | \\__ \\ |___| | | | |   <\n|___|_|  |_|___/_____|_|_| |_|_|\\_\\\n\nconnected  •  room: %s  •  mode: %s\n\nJust type your messages. /irislink leave when done.\n\n", otp, mode)
+	fmt.Printf("\nconnected  •  room: %s  •  mode: %s\n\n", otp, mode)
+
+	runTUIWithClient(otp, handle, mode, client, incoming, cfg)
+
+	client.Disconnect(context.Background())
+	state.ClearPending()
+	home, _ := os.UserHomeDir()
+	os.Remove(filepath.Join(home, ".irislink", "rooms", otp+".meta"))
 }
 
-// runLeave: irislink leave
+// runLeave: irislink leave (non-TUI cleanup, kept for scripting)
 func runLeave() {
 	p, err := state.ReadPending()
 	if err != nil || p == nil || p.OTP == "" {
@@ -110,7 +130,6 @@ func runLeave() {
 	}
 	otp := p.OTP
 
-	// Publish leave presence
 	cfg := state.ReadConfig()
 	meta := state.ReadMeta(otp)
 	key, err := ilcrypto.DeriveEncKey(otp)
@@ -118,203 +137,28 @@ func runLeave() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if client, err := transport.Connect(ctx, cfg.BrokerAddr(), p.RoomID, meta.Handle, key, func(transport.Envelope) {}, cfg.Username, cfg.Password); err == nil {
-			client.Publish(ctx, transport.Envelope{Type: "presence", Text: "left"})
+			client.Publish(ctx, transport.Envelope{Type: "presence", Text: "left"}) //nolint:errcheck
 			client.Disconnect(ctx)
 		}
 	}
 
-	killPoller(otp)
 	state.ClearPending()
-
 	home, _ := os.UserHomeDir()
 	os.Remove(filepath.Join(home, ".irislink", "rooms", otp+".meta"))
 	os.Remove(filepath.Join(home, ".irislink", "rooms", otp+".pid"))
 
-	if err := deregisterHook(); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not deregister hook: %v\n", err)
-	}
-
-	fmt.Printf("Left room %s. Log at ~/.irislink/rooms/%s.log\n", otp, otp)
+	fmt.Printf("Left room %s.\n", otp)
 }
 
-// runPoll: irislink poll <otp> <handle> <mode>
-// Spawned as a detached background process by create/join.
-func runPoll() {
-	if len(os.Args) < 5 {
-		fatalf("usage: irislink poll <otp> <handle> <mode>")
-	}
-	otp := os.Args[2]
-	handle := os.Args[3]
-	// mode := os.Args[4]  // reserved for future mediation
-
-	p, err := state.ReadPending()
-	if err != nil || p == nil {
-		os.Exit(1)
-	}
-
-	key, err := ilcrypto.DeriveEncKey(otp)
+// runTUIWithClient launches the bubbletea TUI with an already-connected client.
+func runTUIWithClient(otp, handle, mode string, client *transport.Client, incoming chan transport.Envelope, cfg state.Config) {
+	cwd, err := os.Getwd()
 	if err != nil {
-		os.Exit(1)
+		cwd = "."
 	}
-
-	cfg := state.ReadConfig()
-	home, _ := os.UserHomeDir()
-	logPath := filepath.Join(home, ".irislink", "rooms", otp+".log")
-
-	for {
-		ctx := context.Background()
-		client, err := transport.Connect(ctx, cfg.BrokerAddr(), p.RoomID, handle, key, func(env transport.Envelope) {
-			if env.Type == "presence" {
-				if env.Text == "joined" {
-					fmt.Fprintln(os.Stderr, "\n ___      _     _     _       _    ")
-					fmt.Fprintln(os.Stderr, "|_ _|_ __(_)___| |   (_)_ __ | | __")
-					fmt.Fprintln(os.Stderr, " | || '__| / __| |   | | '_ \\| |/ /")
-					fmt.Fprintln(os.Stderr, " | || |  | \\__ \\ |___| | | | |   < ")
-					fmt.Fprintln(os.Stderr, "|___|_|  |_|___/_____|_|_| |_|_|\\_\\")
-					fmt.Fprintf(os.Stderr, "\n%s joined — just type!\n\n", env.Sender)
-				} else if env.Text == "left" {
-					fmt.Fprintf(os.Stderr, "\n[%s left the room]\n", env.Sender)
-					f, _ := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-					if f != nil {
-						fmt.Fprintf(f, "[%s left]\n", env.Sender)
-						f.Close()
-					}
-				}
-				return
-			}
-			// message
-			ts := time.UnixMilli(env.Timestamp).Format("15:04:05")
-			line := fmt.Sprintf("[%s] %s: %s\n", ts, env.Sender, env.Text)
-			f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-			if err == nil {
-				f.WriteString(line)
-				f.Close()
-			}
-		}, cfg.Username, cfg.Password)
-		if err != nil {
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		// Check if pending is still active; if not, disconnect and exit
-		for {
-			time.Sleep(10 * time.Second)
-			if _, err := state.ReadPending(); err != nil {
-				client.Disconnect(context.Background())
-				return
-			}
-			_ = client
-		}
+	m := initialModel(otp, handle, mode, client, incoming, cfg, cwd)
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
 	}
-}
-
-func startPoller(otp, handle, mode string) error {
-	exe, err := os.Executable()
-	if err != nil {
-		exe = "irislink"
-	}
-	cmd := exec.Command(exe, "poll", otp, handle, mode)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	home, _ := os.UserHomeDir()
-	pidPath := filepath.Join(home, ".irislink", "rooms", otp+".pid")
-	os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o644)
-	cmd.Process.Release()
-	return nil
-}
-
-func killPoller(otp string) {
-	home, _ := os.UserHomeDir()
-	pidPath := filepath.Join(home, ".irislink", "rooms", otp+".pid")
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
-		return
-	}
-	var pid int
-	fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid)
-	if pid > 0 {
-		if proc, err := os.FindProcess(pid); err == nil {
-			proc.Signal(syscall.SIGTERM)
-		}
-	}
-}
-
-func registerHook() error {
-	exe, err := os.Executable()
-	if err != nil {
-		exe = "irislink"
-	}
-	hookCmd := exe + " hook"
-
-	home, _ := os.UserHomeDir()
-	settingsPath := filepath.Join(home, ".claude", "settings.json")
-
-	var settings map[string]any
-	if data, err := os.ReadFile(settingsPath); err == nil {
-		json.Unmarshal(data, &settings)
-	}
-	if settings == nil {
-		settings = map[string]any{}
-	}
-
-	hooks, _ := settings["hooks"].(map[string]any)
-	if hooks == nil {
-		hooks = map[string]any{}
-		settings["hooks"] = hooks
-	}
-	ups, _ := hooks["UserPromptSubmit"].([]any)
-	for _, entry := range ups {
-		if b, _ := json.Marshal(entry); strings.Contains(string(b), "irislink hook") {
-			return nil
-		}
-	}
-	ups = append(ups, map[string]any{
-		"matcher": "",
-		"hooks":   []any{map[string]any{"type": "command", "command": hookCmd}},
-	})
-	hooks["UserPromptSubmit"] = ups
-
-	out, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(settingsPath, out, 0o644)
-}
-
-func deregisterHook() error {
-	home, _ := os.UserHomeDir()
-	settingsPath := filepath.Join(home, ".claude", "settings.json")
-
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		return nil
-	}
-	var settings map[string]any
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return nil
-	}
-
-	hooks, _ := settings["hooks"].(map[string]any)
-	if hooks == nil {
-		return nil
-	}
-	ups, _ := hooks["UserPromptSubmit"].([]any)
-	filtered := ups[:0]
-	for _, entry := range ups {
-		if b, _ := json.Marshal(entry); !strings.Contains(string(b), "irislink hook") {
-			filtered = append(filtered, entry)
-		}
-	}
-	hooks["UserPromptSubmit"] = filtered
-
-	out, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(settingsPath, out, 0o644)
 }
