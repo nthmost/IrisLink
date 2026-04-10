@@ -15,11 +15,12 @@ import (
 )
 
 const (
-	apiURL  = "https://api.anthropic.com/v1/messages"
-	apiVer  = "2023-06-01"
-	model   = "claude-haiku-4-5-20251001"
-	maxCtx  = 50 * 1024 // 50 KB total file budget
-	maxExc  = 500       // max chars per excerpt in response
+	apiURL        = "https://api.anthropic.com/v1/messages"
+	apiVer        = "2023-06-01"
+	modelContext  = "claude-haiku-4-5-20251001"  // fast/cheap for context selection
+	modelMediate  = "claude-sonnet-4-6"           // mediate + game-master
+	maxCtx        = 50 * 1024                     // 50 KB total file budget
+	maxExc        = 500                            // max chars per excerpt in response
 )
 
 // skipDirs are directories we never walk into when collecting context.
@@ -52,6 +53,10 @@ type apiResponse struct {
 }
 
 func callClaude(apiKey, prompt string) (string, error) {
+	return callClaudeModel(apiKey, modelContext, prompt)
+}
+
+func callClaudeModel(apiKey, model, prompt string) (string, error) {
 	body, err := json.Marshal(apiRequest{
 		Model:     model,
 		MaxTokens: 1024,
@@ -201,5 +206,5 @@ func Mediate(apiKey, mode, msg string) (string, error) {
 		return msg, nil
 	}
 
-	return callClaude(apiKey, prompt)
+	return callClaudeModel(apiKey, modelMediate, prompt)
 }

@@ -573,14 +573,12 @@ func (m tuiModel) renderClaudePanel(width int) []string {
 		masked = m.cfg.ClaudeAPIKey[:12] + "..."
 	}
 
-	// Context model is always haiku (fast); mediation uses opus if game-master
+	// Context selection always uses haiku (fast/cheap).
+	// Mediation uses sonnet for both mediate and game-master modes.
 	contextModel := "haiku-4-5"
 	mediateModel := "—"
-	switch m.mode {
-	case "mediate":
-		mediateModel = "haiku-4-5"
-	case "game-master":
-		mediateModel = "opus-4-6"
+	if m.mode == "mediate" || m.mode == "game-master" {
+		mediateModel = "sonnet-4-6"
 	}
 
 	label := "  ✓ claude"
