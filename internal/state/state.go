@@ -56,20 +56,61 @@ func ClearPending() error {
 
 // Config represents ~/.irislink/config.json
 type Config struct {
-	ConnectorURL string `json:"connector_url"`
+	ConnectorURL  string `json:"connector_url"`
+	RendezvousURL string `json:"rendezvous_url"`
 }
 
 func ReadConfig() Config {
 	data, err := os.ReadFile(filepath.Join(irisDir(), "config.json"))
 	if err != nil {
-		return Config{ConnectorURL: "http://localhost:8357"}
+		return Config{ConnectorURL: "http://localhost:8357", RendezvousURL: "http://localhost:4173"}
 	}
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
-		return Config{ConnectorURL: "http://localhost:8357"}
+		return Config{ConnectorURL: "http://localhost:8357", RendezvousURL: "http://localhost:4173"}
 	}
 	if c.ConnectorURL == "" {
 		c.ConnectorURL = "http://localhost:8357"
 	}
+	if c.RendezvousURL == "" {
+		c.RendezvousURL = "http://localhost:4173"
+	}
 	return c
+}
+
+// Meta represents ~/.irislink/rooms/<otp>.meta
+type Meta struct {
+	Handle string `json:"handle"`
+	Mode   string `json:"mode"`
+	Cursor int64  `json:"cursor"`
+}
+
+func WriteMeta(otp string, m Meta) error {
+	if err := os.MkdirAll(roomsDir(), 0o755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(roomsDir(), otp+".meta"), data, 0o644)
+}
+
+func ReadMeta(otp string) Meta {
+	m := Meta{Handle: "operator", Mode: "relay", Cursor: 0}
+	data, err := os.ReadFile(filepath.Join(roomsDir(), otp+".meta"))
+	if err != nil {
+		return m
+	}
+	var parsed Meta
+	if json.Unmarshal(data, &parsed) == nil {
+		if parsed.Handle != "" {
+			m.Handle = parsed.Handle
+		}
+		if parsed.Mode != "" {
+			m.Mode = parsed.Mode
+		}
+		m.Cursor = parsed.Cursor
+	}
+	return m
 }

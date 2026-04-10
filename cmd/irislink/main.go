@@ -25,6 +25,14 @@ func main() {
 		os.Exit(1)
 	}
 	switch os.Args[1] {
+	case "create":
+		runCreate()
+	case "join":
+		runJoin()
+	case "leave":
+		runLeave()
+	case "poll":
+		runPoll()
 	case "server":
 		runServer()
 	case "proxy":
@@ -55,9 +63,16 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `irislink — Claude-to-Claude pairing tool
 
-Commands:
+Session commands:
+  create <handle> [mode]      Create room, register hook, start poller
+  join <otp> <handle> [mode]  Join room, register hook, start poller
+  leave                       Close room, kill poller, deregister hook
+
+Infrastructure:
   server                      Start the rendezvous server (default port 4173)
   proxy                       Start the connector proxy (default port 8357)
+
+Low-level / debug:
   otp                         Generate a random 6-char OTP
   room-id <otp>               Derive room_id from OTP via HKDF
   pending write <otp> <rid>   Write ~/.irislink/rooms/pending.json
@@ -275,7 +290,8 @@ func runHook() {
 	connURL := cfg.ConnectorURL
 
 	// Read meta for handle/mode/cursor
-	handle, mode, cursor := readMeta(p.OTP)
+	meta := state.ReadMeta(p.OTP)
+	handle, mode, cursor := meta.Handle, meta.Mode, meta.Cursor
 
 	// Read recent log lines
 	inbound := readLog(p.OTP, 5)
@@ -310,30 +326,6 @@ After relaying, respond normally. To exit relay mode: /irislink leave`,
 }
 
 // --- helpers ---
-
-func readMeta(otp string) (handle, mode string, cursor int64) {
-	handle, mode, cursor = "operator", "relay", 0
-	home, _ := os.UserHomeDir()
-	data, err := os.ReadFile(home + "/.irislink/rooms/" + otp + ".meta")
-	if err != nil {
-		return
-	}
-	var m struct {
-		Handle string `json:"handle"`
-		Mode   string `json:"mode"`
-		Cursor int64  `json:"cursor"`
-	}
-	if json.Unmarshal(data, &m) == nil {
-		if m.Handle != "" {
-			handle = m.Handle
-		}
-		if m.Mode != "" {
-			mode = m.Mode
-		}
-		cursor = m.Cursor
-	}
-	return
-}
 
 func readLog(otp string, n int) string {
 	home, _ := os.UserHomeDir()
