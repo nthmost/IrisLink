@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -57,6 +58,10 @@ var (
 const (
 	composeRows = 5
 	sidebarW    = 26
+
+	focusCompose = 0
+	focusSidebar = 1
+	focusClaude  = 2
 )
 
 func sendKey() string {
@@ -96,9 +101,11 @@ type tuiModel struct {
 	height        int
 	showWaiting   bool
 	sentFiles     map[string]bool // files sent as context this session
-	sidebarFocus  bool
+	focusArea     int             // 0=compose, 1=sidebar tree, 2=claude panel
 	sidebarCursor int
 	expanded      map[string]bool // which dirs are expanded
+	loginOverlay  bool            // true = show masked key input overlay
+	loginInput    textinput.Model
 }
 
 func initialModel(otp, handle, mode string, client *transport.Client, incoming chan transport.Envelope, cfg state.Config, cwd string, showWaiting bool) tuiModel {
@@ -119,6 +126,19 @@ func initialModel(otp, handle, mode string, client *transport.Client, incoming c
 	ta.FocusedStyle = focused
 	ta.Prompt = ""
 
+	li := textinput.New()
+	li.Placeholder = "sk-ant-..."
+	li.EchoMode = textinput.EchoPassword
+	li.CharLimit = 200
+	li.Width = 30
+
+	if cfg.ClaudeAPIKey == "" {
+		if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
+			cfg.ClaudeAPIKey = v
+			state.WriteConfig(cfg) //nolint:errcheck
+		}
+	}
+
 	return tuiModel{
 		compose:     ta,
 		showWaiting: showWaiting,
@@ -133,6 +153,7 @@ func initialModel(otp, handle, mode string, client *transport.Client, incoming c
 		height:      24,
 		sentFiles:   make(map[string]bool),
 		expanded:    make(map[string]bool),
+		loginInput:  li,
 	}
 }
 
@@ -167,6 +188,39 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	skipCompose := false
 
+	// Handle login overlay before normal processing.
+	if m.loginOverlay {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.loginOverlay = false
+				m.loginInput.Blur()
+				skipCompose = true
+				return m, nil
+			case tea.KeyEnter:
+				key := strings.TrimSpace(m.loginInput.Value())
+				if key != "" {
+					m.cfg.ClaudeAPIKey = key
+					state.WriteConfig(m.cfg) //nolint:errcheck
+					m.addSystem("logged in — Claude context enabled")
+				}
+				m.loginOverlay = false
+				m.loginInput.Blur()
+				skipCompose = true
+				return m, nil
+			default:
+				var liCmd tea.Cmd
+				m.loginInput, liCmd = m.loginInput.Update(msg)
+				return m, liCmd
+			}
+		default:
+			var liCmd tea.Cmd
+			m.loginInput, liCmd = m.loginInput.Update(msg)
+			return m, liCmd
+		}
+	}
+
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
@@ -185,27 +239,29 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case msg.Type == tea.KeyTab:
 			skipCompose = true
-			m.sidebarFocus = !m.sidebarFocus
-			if m.sidebarFocus {
-				m.compose.Blur()
-			} else {
+			m.focusArea = (m.focusArea + 1) % 3
+			if m.focusArea == focusCompose {
 				m.compose.Focus()
+				m.loginInput.Blur()
+			} else {
+				m.compose.Blur()
+				m.loginInput.Blur()
 			}
 
-		case m.sidebarFocus && msg.Type == tea.KeyUp:
+		case m.focusArea == focusSidebar && msg.Type == tea.KeyUp:
 			skipCompose = true
 			if m.sidebarCursor > 0 {
 				m.sidebarCursor--
 			}
 
-		case m.sidebarFocus && msg.Type == tea.KeyDown:
+		case m.focusArea == focusSidebar && msg.Type == tea.KeyDown:
 			skipCompose = true
 			items := m.buildSidebarItems()
 			if m.sidebarCursor < len(items)-1 {
 				m.sidebarCursor++
 			}
 
-		case m.sidebarFocus && (msg.Type == tea.KeyEnter || msg.String() == " "):
+		case m.focusArea == focusSidebar && (msg.Type == tea.KeyEnter || msg.String() == " "):
 			skipCompose = true
 			items := m.buildSidebarItems()
 			if m.sidebarCursor < len(items) {
@@ -215,7 +271,21 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-		case !m.sidebarFocus && msg.Alt && msg.Type == tea.KeyEnter:
+		case m.focusArea == focusClaude && msg.Type == tea.KeyEnter:
+			skipCompose = true
+			if m.cfg.ClaudeAPIKey == "" {
+				// open login overlay
+				m.loginOverlay = true
+				m.loginInput.SetValue("")
+				m.loginInput.Focus()
+			} else {
+				// logout
+				m.cfg.ClaudeAPIKey = ""
+				state.WriteConfig(m.cfg) //nolint:errcheck
+				m.addSystem("logged out")
+			}
+
+		case m.focusArea == focusCompose && msg.Alt && msg.Type == tea.KeyEnter:
 			// Alt/Opt+Enter sends — don't forward to textarea
 			skipCompose = true
 			raw := strings.TrimSpace(m.compose.Value())
@@ -318,6 +388,10 @@ func (m tuiModel) View() string {
 
 	if m.showWaiting {
 		return m.renderWaitingPopover(header, heavyDiv, w)
+	}
+
+	if m.loginOverlay {
+		return m.renderLoginOverlay(w)
 	}
 
 	// Layout: header(1) + heavyDiv(1) + body(msgRows+composeRows+1) + divider(1) + hint(1)
@@ -428,6 +502,50 @@ func (m tuiModel) buildSidebarItems() []sidebarItem {
 	return items
 }
 
+// renderClaudePanel renders the claude login/status panel at the bottom of the sidebar.
+func (m tuiModel) renderClaudePanel(width int) []string {
+	inner := width - 1
+	sep := styleDivider.Render(" " + strings.Repeat("─", inner-1))
+
+	focused := m.focusArea == focusClaude
+
+	if m.cfg.ClaudeAPIKey == "" {
+		label := "  [ LOGIN ]"
+		var btn string
+		if focused {
+			btn = lipgloss.NewStyle().
+				Background(colDarkTeal).
+				Foreground(lipgloss.Color("#ffffff")).
+				Bold(true).
+				Render(padToVisible(label, inner))
+		} else {
+			btn = styleSidebarHint.Render(label)
+		}
+		return []string{sep, btn, styleSidebarHint.Render("  claude context"), ""}
+	}
+
+	// logged in
+	masked := "sk-ant-..."
+	if len(m.cfg.ClaudeAPIKey) > 8 {
+		masked = m.cfg.ClaudeAPIKey[:8] + "..."
+	}
+	statusStyle := lipgloss.NewStyle().Foreground(colCyan)
+	label := "  ✓ claude"
+	var header string
+	if focused {
+		header = lipgloss.NewStyle().
+			Background(colDarkTeal).
+			Foreground(lipgloss.Color("#ffffff")).
+			Bold(true).
+			Render(padToVisible(label, inner))
+	} else {
+		header = statusStyle.Render(label)
+	}
+	keyLine := styleSidebarHint.Render("  " + masked)
+	hintLine := styleSidebarHint.Render("  enter: logout")
+	return []string{sep, header, keyLine, hintLine}
+}
+
 // renderSidebar returns lines for the context sidebar (width = sidebarW).
 func (m tuiModel) renderSidebar(totalRows int) []string {
 	inner := sidebarW - 1
@@ -435,6 +553,12 @@ func (m tuiModel) renderSidebar(totalRows int) []string {
 	title := styleSidebarHeader.Render(" context")
 	sep := styleDivider.Render(" " + strings.Repeat("─", inner-1))
 	lines := []string{title, sep}
+
+	// Reserve last 5 rows for the claude panel (4 lines + 1 buffer).
+	treeRows := totalRows - 6
+	if treeRows < 0 {
+		treeRows = 0
+	}
 
 	items := m.buildSidebarItems()
 	if len(items) == 0 {
@@ -445,6 +569,7 @@ func (m tuiModel) renderSidebar(totalRows int) []string {
 		Foreground(lipgloss.Color("#ffffff")).
 		Bold(true)
 
+	treeLines := []string{}
 	for i, item := range items {
 		label := " " + item.label
 		if lipgloss.Width(label) > inner {
@@ -459,24 +584,32 @@ func (m tuiModel) renderSidebar(totalRows int) []string {
 				}
 			}
 		}
-		selected := m.sidebarFocus && i == m.sidebarCursor
+		selected := m.focusArea == focusSidebar && i == m.sidebarCursor
 		switch {
 		case selected:
-			lines = append(lines, selectedBg.Render(padToVisible(label, inner)))
+			treeLines = append(treeLines, selectedBg.Render(padToVisible(label, inner)))
 		case sent:
-			lines = append(lines, styleSidebarSent.Render(label))
+			treeLines = append(treeLines, styleSidebarSent.Render(label))
 		case item.isDir:
-			lines = append(lines, styleSidebarHeader.Render(label))
+			treeLines = append(treeLines, styleSidebarHeader.Render(label))
 		default:
-			lines = append(lines, styleSidebarFile.Render(label))
+			treeLines = append(treeLines, styleSidebarFile.Render(label))
 		}
 	}
 
-	if m.cfg.ClaudeAPIKey == "" {
-		lines = append(lines, "")
-		lines = append(lines, styleSidebarHint.Render(" /login to enable"))
-		lines = append(lines, styleSidebarHint.Render(" auto-context"))
+	// Trim or pad tree section to treeRows.
+	if len(treeLines) > treeRows {
+		treeLines = treeLines[:treeRows]
 	}
+	for len(treeLines) < treeRows {
+		treeLines = append(treeLines, "")
+	}
+
+	lines = append(lines, treeLines...)
+
+	// Append claude panel at the bottom.
+	claudeLines := m.renderClaudePanel(sidebarW)
+	lines = append(lines, claudeLines...)
 
 	for len(lines) < totalRows {
 		lines = append(lines, "")
@@ -522,6 +655,37 @@ func (m tuiModel) renderWaitingPopover(header, heavyDiv string, w int) string {
 	hint := stylePrompt.Render("  ctrl+c to quit")
 
 	return strings.Join([]string{header, heavyDiv, centered, hint}, "\n")
+}
+
+// ─── login overlay ───────────────────────────────────────────────────────────
+
+func (m tuiModel) renderLoginOverlay(w int) string {
+	boxW := 40
+	if boxW > w-4 {
+		boxW = w - 4
+	}
+
+	title := lipgloss.NewStyle().Foreground(colCyan).Bold(true).
+		Width(boxW).Align(lipgloss.Center).Render("CLAUDE LOGIN")
+	prompt := lipgloss.NewStyle().Foreground(colDimBlue).
+		Width(boxW).Align(lipgloss.Center).Render("paste your Anthropic API key")
+	hint := lipgloss.NewStyle().Foreground(colDimGray).Italic(true).
+		Width(boxW).Align(lipgloss.Center).Render("enter to confirm  •  esc to cancel")
+
+	input := lipgloss.NewStyle().Width(boxW).Align(lipgloss.Center).Render(m.loginInput.View())
+
+	boxContent := strings.Join([]string{"", title, "", prompt, "", input, "", hint, ""}, "\n")
+	box := lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder()).
+		BorderForeground(colDarkTeal).
+		Padding(0, 2).
+		Render(boxContent)
+
+	h := m.height
+	if h < 10 {
+		h = 10
+	}
+	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, box)
 }
 
 // ─── message rendering ───────────────────────────────────────────────────────
@@ -573,18 +737,6 @@ func (m tuiModel) handleSlash(cmd string) (tea.Model, tea.Cmd) {
 	case "/leave":
 		return m, tea.Quit
 
-	case "/login":
-		if len(parts) > 1 {
-			m.cfg.ClaudeAPIKey = parts[1]
-			if err := state.WriteConfig(m.cfg); err != nil {
-				m.addSystem("warning: could not save config: " + err.Error())
-			} else {
-				m.addSystem("logged in — Claude context enabled")
-			}
-		} else {
-			m.addSystem("usage: /login <api-key>")
-		}
-
 	case "/mode":
 		if len(parts) > 1 {
 			m.mode = parts[1]
@@ -594,7 +746,7 @@ func (m tuiModel) handleSlash(cmd string) (tea.Model, tea.Cmd) {
 		}
 
 	case "/help":
-		m.addSystem(sendKey() + ": send  •  /login <key>  •  /leave  •  /mode relay|mediate|game-master")
+		m.addSystem(sendKey() + ": send  •  tab: cycle focus (compose/files/claude)  •  /leave  •  /mode relay|mediate|game-master")
 
 	default:
 		m.addSystem("unknown command: " + parts[0])
