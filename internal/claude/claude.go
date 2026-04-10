@@ -181,6 +181,19 @@ Files:
 	return blocks, nil
 }
 
+// Ask responds to a direct query (triggered by "Hey Claude" in a message).
+// It answers concisely without rewriting or mediating.
+func Ask(apiKey, model, query string) (string, error) {
+	if apiKey == "" {
+		return "", fmt.Errorf("no API key")
+	}
+	if model == "" {
+		model = modelMediate
+	}
+	prompt := fmt.Sprintf("Answer the following question or request directly and concisely. Do not add preamble.\n\n%s", query)
+	return callClaudeModel(apiKey, model, prompt)
+}
+
 // Mediate rewrites msg for clarity (mediate mode) or adds GM narrative
 // (game-master mode). Returns original msg if mode is relay or no API key.
 // model may be "" to use the default mediation model.

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 func irisDir() string {
@@ -109,6 +110,26 @@ func (c Config) BrokerAddr() string {
 		url += ":1883"
 	}
 	return url
+}
+
+// AppendLog appends a message to the session's JSONL history log.
+func AppendLog(otp, sender, text string) {
+	type entry struct {
+		TS     time.Time `json:"ts"`
+		Sender string    `json:"sender"`
+		Text   string    `json:"text"`
+	}
+	data, err := json.Marshal(entry{TS: time.Now(), Sender: sender, Text: text})
+	if err != nil {
+		return
+	}
+	path := filepath.Join(roomsDir(), otp+".log")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.Write(append(data, '\n')) //nolint:errcheck
 }
 
 func containsColon(s string) bool {

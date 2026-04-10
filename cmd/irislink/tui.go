@@ -64,7 +64,8 @@ var (
 	styleTextSelf  = lipgloss.NewStyle().Foreground(colCyan)
 	styleTextOther = lipgloss.NewStyle().Foreground(lipgloss.Color("#e0e0e0"))
 
-	styleSystem = lipgloss.NewStyle().Foreground(colDimGray).Italic(true)
+	styleSystem  = lipgloss.NewStyle().Foreground(colDimGray).Italic(true)
+	styleClaude  = lipgloss.NewStyle().Foreground(colCyan).Italic(true)
 	stylePrompt = lipgloss.NewStyle().Foreground(colDimBlue)
 
 	styleSidebarHeader = lipgloss.NewStyle().Foreground(colDimBlue).Bold(true)
@@ -98,6 +99,7 @@ type chatMsg struct {
 	text     string
 	isSelf   bool
 	isSystem bool
+	isClaude bool
 }
 
 type incomingEnvMsg struct{ env transport.Envelope }
@@ -107,6 +109,10 @@ type selfSentMsg struct {
 }
 type sendErrMsg struct{ err error }
 type apiKeyReceivedMsg struct{ key string }
+type claudeResponseMsg struct {
+	query    string
+	response string
+}
 
 // ─── model ───────────────────────────────────────────────────────────────────
 
@@ -340,7 +346,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if strings.HasPrefix(raw, "/") {
 				return m.handleSlash(raw)
 			}
-			cmds = append(cmds, m.sendMsg(raw))
+			if strings.HasPrefix(strings.ToLower(raw), "hey claude") {
+				state.AppendLog(m.otp, m.handle, raw)
+				cmds = append(cmds, m.askClaudeCmd(raw))
+			} else {
+				cmds = append(cmds, m.sendMsg(raw))
+			}
 		}
 
 	case incomingEnvMsg:
@@ -357,6 +368,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				sender: env.Sender,
 				text:   env.Text,
 			})
+			state.AppendLog(m.otp, env.Sender, env.Text)
 			fileContext(m.cwd, env.Sender, env.Context)
 		}
 		cmds = append(cmds, waitForMsg(m.incoming))
@@ -368,9 +380,19 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text:   msg.text,
 			isSelf: true,
 		})
+		state.AppendLog(m.otp, m.handle, msg.text)
 		for _, b := range msg.blocks {
 			m.sentFiles[b.Source] = true
 		}
+
+	case claudeResponseMsg:
+		m.messages = append(m.messages, chatMsg{
+			ts:       time.Now(),
+			sender:   "claude",
+			text:     msg.response,
+			isClaude: true,
+		})
+		state.AppendLog(m.otp, "claude", msg.response)
 
 	case sendErrMsg:
 		m.addSystem("send error: " + msg.err.Error())
@@ -388,6 +410,23 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+// askClaudeCmd handles a "Hey Claude" message: asks Claude directly and returns
+// a claudeResponseMsg. The message is NOT forwarded to the other party.
+func (m *tuiModel) askClaudeCmd(query string) tea.Cmd {
+	apiKey := m.cfg.ClaudeAPIKey
+	model := m.cfg.ClaudeModel
+	return func() tea.Msg {
+		if apiKey == "" {
+			return claudeResponseMsg{query: query, response: "(no Claude API key — use tab→claude to log in)"}
+		}
+		resp, err := claude.Ask(apiKey, model, query)
+		if err != nil {
+			return claudeResponseMsg{query: query, response: "(error: " + err.Error() + ")"}
+		}
+		return claudeResponseMsg{query: query, response: resp}
+	}
 }
 
 // sendMsg builds, mediates if needed, selects context, and publishes.
@@ -832,6 +871,22 @@ func (m tuiModel) renderLoginOverlay(w int) string {
 func renderMsg(cm chatMsg, w int) []string {
 	if cm.isSystem {
 		return []string{styleSystem.Render("  ∙ " + cm.text)}
+	}
+	if cm.isClaude {
+		tsStr := styleTimestamp.Render(cm.ts.Format("02 Jan 15:04"))
+		headerLine := "  " + styleClaude.Render("claude") + "  " + tsStr
+		textW := w - 4
+		if textW < 10 {
+			textW = 10
+		}
+		var bodyLines []string
+		for _, para := range strings.Split(cm.text, "\n") {
+			wrapped := styleClaude.Width(textW).Render(para)
+			for _, line := range strings.Split(wrapped, "\n") {
+				bodyLines = append(bodyLines, "  "+line)
+			}
+		}
+		return append([]string{headerLine}, bodyLines...)
 	}
 
 	var senderStr string
