@@ -83,19 +83,22 @@ type sendErrMsg struct{ err error }
 // ─── model ───────────────────────────────────────────────────────────────────
 
 type tuiModel struct {
-	messages    []chatMsg
-	compose     textarea.Model
-	otp         string
-	handle      string
-	mode        string
-	client      *transport.Client
-	incoming    chan transport.Envelope
-	cfg         state.Config
-	cwd         string
-	width       int
-	height      int
-	showWaiting bool
-	sentFiles   map[string]bool // files sent as context this session
+	messages      []chatMsg
+	compose       textarea.Model
+	otp           string
+	handle        string
+	mode          string
+	client        *transport.Client
+	incoming      chan transport.Envelope
+	cfg           state.Config
+	cwd           string
+	width         int
+	height        int
+	showWaiting   bool
+	sentFiles     map[string]bool // files sent as context this session
+	sidebarFocus  bool
+	sidebarCursor int
+	expanded      map[string]bool // which dirs are expanded
 }
 
 func initialModel(otp, handle, mode string, client *transport.Client, incoming chan transport.Envelope, cfg state.Config, cwd string, showWaiting bool) tuiModel {
@@ -129,6 +132,7 @@ func initialModel(otp, handle, mode string, client *transport.Client, incoming c
 		width:       80,
 		height:      24,
 		sentFiles:   make(map[string]bool),
+		expanded:    make(map[string]bool),
 	}
 }
 
@@ -179,8 +183,40 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.Type == tea.KeyCtrlC:
 			return m, tea.Quit
 
-		case msg.Alt && msg.Type == tea.KeyEnter:
-			// Alt+Enter sends — don't forward to textarea
+		case msg.Type == tea.KeyTab:
+			skipCompose = true
+			m.sidebarFocus = !m.sidebarFocus
+			if m.sidebarFocus {
+				m.compose.Blur()
+			} else {
+				m.compose.Focus()
+			}
+
+		case m.sidebarFocus && msg.Type == tea.KeyUp:
+			skipCompose = true
+			if m.sidebarCursor > 0 {
+				m.sidebarCursor--
+			}
+
+		case m.sidebarFocus && msg.Type == tea.KeyDown:
+			skipCompose = true
+			items := m.buildSidebarItems()
+			if m.sidebarCursor < len(items)-1 {
+				m.sidebarCursor++
+			}
+
+		case m.sidebarFocus && (msg.Type == tea.KeyEnter || msg.String() == " "):
+			skipCompose = true
+			items := m.buildSidebarItems()
+			if m.sidebarCursor < len(items) {
+				item := items[m.sidebarCursor]
+				if item.isDir {
+					m.expanded[item.path] = !m.expanded[item.path]
+				}
+			}
+
+		case !m.sidebarFocus && msg.Alt && msg.Type == tea.KeyEnter:
+			// Alt/Opt+Enter sends — don't forward to textarea
 			skipCompose = true
 			raw := strings.TrimSpace(m.compose.Value())
 			m.compose.Reset()
@@ -345,10 +381,51 @@ func (m tuiModel) View() string {
 	}
 	body := strings.Join(bodyParts, "\n")
 
-	hint := stylePrompt.Render("  " + sendKey() + " to send  •  /help for commands")
+	hint := stylePrompt.Render("  " + sendKey() + " to send  •  tab: browse files  •  /help")
 	divider := styleDivider.Render(strings.Repeat("─", w))
 
 	return strings.Join([]string{header, heavyDiv, body, divider, hint}, "\n")
+}
+
+// sidebarItem is one navigable row in the sidebar tree.
+type sidebarItem struct {
+	label string
+	path  string
+	isDir bool
+	depth int
+}
+
+// buildSidebarItems expands the tree based on m.expanded.
+func (m tuiModel) buildSidebarItems() []sidebarItem {
+	top := cwdEntries(m.cwd)
+	var items []sidebarItem
+	for _, e := range top {
+		arrow := "▶ "
+		if m.expanded[e.path] {
+			arrow = "▼ "
+		}
+		label := e.label
+		if e.isDir {
+			label = arrow + e.label
+		}
+		items = append(items, sidebarItem{label: label, path: e.path, isDir: e.isDir, depth: 0})
+		if e.isDir && m.expanded[e.path] {
+			children, _ := os.ReadDir(filepath.Join(m.cwd, e.path))
+			for _, c := range children {
+				if strings.HasPrefix(c.Name(), ".") || c.IsDir() {
+					continue
+				}
+				childPath := e.path + "/" + c.Name()
+				items = append(items, sidebarItem{
+					label: "  " + c.Name(),
+					path:  childPath,
+					isDir: false,
+					depth: 1,
+				})
+			}
+		}
+	}
+	return items
 }
 
 // renderSidebar returns lines for the context sidebar (width = sidebarW).
@@ -359,32 +436,38 @@ func (m tuiModel) renderSidebar(totalRows int) []string {
 	sep := styleDivider.Render(" " + strings.Repeat("─", inner-1))
 	lines := []string{title, sep}
 
-	entries := cwdEntries(m.cwd)
-	if len(entries) == 0 {
+	items := m.buildSidebarItems()
+	if len(items) == 0 {
 		lines = append(lines, styleSidebarHint.Render(" (empty dir)"))
 	}
-	for _, e := range entries {
-		label := " " + e.label
+	selectedBg := lipgloss.NewStyle().
+		Background(colDarkTeal).
+		Foreground(lipgloss.Color("#ffffff")).
+		Bold(true)
+
+	for i, item := range items {
+		label := " " + item.label
 		if lipgloss.Width(label) > inner {
-			// truncate from left so the end (file count) stays visible
-			label = " …" + e.label[len(e.label)-(inner-3):]
+			label = " …" + item.label[len(item.label)-(inner-3):]
 		}
-		// Highlight if this dir/file had context sent from it.
-		sent := m.sentFiles[e.path]
-		if !sent && e.isDir {
-			// check if any sent file is inside this dir
+		sent := m.sentFiles[item.path]
+		if !sent && item.isDir {
 			for k := range m.sentFiles {
-				if strings.HasPrefix(k, e.path+"/") {
+				if strings.HasPrefix(k, item.path+"/") {
 					sent = true
 					break
 				}
 			}
 		}
-		if sent {
+		selected := m.sidebarFocus && i == m.sidebarCursor
+		switch {
+		case selected:
+			lines = append(lines, selectedBg.Render(padToVisible(label, inner)))
+		case sent:
 			lines = append(lines, styleSidebarSent.Render(label))
-		} else if e.isDir {
+		case item.isDir:
 			lines = append(lines, styleSidebarHeader.Render(label))
-		} else {
+		default:
 			lines = append(lines, styleSidebarFile.Render(label))
 		}
 	}
