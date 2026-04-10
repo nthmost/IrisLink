@@ -57,10 +57,15 @@ func runCreate() {
 		fatalf("cannot connect to broker: %v\nCheck broker_url in ~/.irislink/config.json", err)
 	}
 
-	runTUIWithClient(otp, handle, mode, client, incoming, cfg,
-		"room created — share this code with your partner: "+otp,
-		"waiting for them to join...",
-	)
+	// Show the OTP in plain terminal for 5 seconds before the TUI takes over.
+	fmt.Printf("\n  room created\n\n  code:  %s\n\n  share this with your partner.\n\n", otp)
+	for i := 5; i > 0; i-- {
+		fmt.Printf("\r  launching in %d...  ", i)
+		time.Sleep(time.Second)
+	}
+	fmt.Println()
+
+	runTUIWithClient(otp, handle, mode, client, incoming, cfg, true)
 
 	client.Disconnect(context.Background())
 	state.ClearPending()
@@ -112,9 +117,7 @@ func runJoin() {
 		fatal(err)
 	}
 
-	runTUIWithClient(otp, handle, mode, client, incoming, cfg,
-		"connected to room "+otp+" — just write",
-	)
+	runTUIWithClient(otp, handle, mode, client, incoming, cfg, false)
 
 	client.Disconnect(context.Background())
 	state.ClearPending()
@@ -152,12 +155,13 @@ func runLeave() {
 }
 
 // runTUIWithClient launches the bubbletea TUI with an already-connected client.
-func runTUIWithClient(otp, handle, mode string, client *transport.Client, incoming chan transport.Envelope, cfg state.Config, initMsgs ...string) {
+// showWaiting opens a popover asking the user to share their OTP.
+func runTUIWithClient(otp, handle, mode string, client *transport.Client, incoming chan transport.Envelope, cfg state.Config, showWaiting bool) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "."
 	}
-	m := initialModel(otp, handle, mode, client, incoming, cfg, cwd, initMsgs...)
+	m := initialModel(otp, handle, mode, client, incoming, cfg, cwd, showWaiting)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)

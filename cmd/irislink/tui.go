@@ -67,20 +67,21 @@ type sendErrMsg struct{ err error }
 const composeRows = 5
 
 type tuiModel struct {
-	messages []chatMsg
-	compose  textarea.Model
-	otp      string
-	handle   string
-	mode     string
-	client   *transport.Client
-	incoming chan transport.Envelope
-	cfg      state.Config
-	cwd      string
-	width    int
-	height   int
+	messages    []chatMsg
+	compose     textarea.Model
+	otp         string
+	handle      string
+	mode        string
+	client      *transport.Client
+	incoming    chan transport.Envelope
+	cfg         state.Config
+	cwd         string
+	width       int
+	height      int
+	showWaiting bool // creator mode: show OTP popover until partner joins
 }
 
-func initialModel(otp, handle, mode string, client *transport.Client, incoming chan transport.Envelope, cfg state.Config, cwd string, initMsgs ...string) tuiModel {
+func initialModel(otp, handle, mode string, client *transport.Client, incoming chan transport.Envelope, cfg state.Config, cwd string, showWaiting bool) tuiModel {
 	ta := textarea.New()
 	ta.Placeholder = "write something... (ctrl+d to send, /help for commands)"
 	ta.Focus()
@@ -100,14 +101,9 @@ func initialModel(otp, handle, mode string, client *transport.Client, incoming c
 
 	ta.Prompt = ""
 
-	var msgs []chatMsg
-	for _, s := range initMsgs {
-		msgs = append(msgs, chatMsg{ts: time.Now(), text: s, isSystem: true})
-	}
-
 	return tuiModel{
-		messages: msgs,
-		compose:  ta,
+		compose:     ta,
+		showWaiting: showWaiting,
 		otp:      otp,
 		handle:   handle,
 		mode:     mode,
@@ -178,6 +174,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		env := msg.env
 		switch env.Type {
 		case "presence":
+			if env.Text == "joined" {
+				m.showWaiting = false
+			}
 			m.addSystem(fmt.Sprintf("%s %s", env.Sender, env.Text))
 		default:
 			m.messages = append(m.messages, chatMsg{
@@ -255,6 +254,11 @@ func (m tuiModel) View() string {
 		"  " + styleHeaderDim.Render(m.mode) +
 		"  " + styleHeaderDim.Render(m.handle)
 
+	// Waiting popover: show centered box until partner joins.
+	if m.showWaiting {
+		return m.renderWaitingPopover(header, heavyDiv, w)
+	}
+
 	// Available height for message scroll area.
 	// Layout: header(1) + heavyDiv(1) + msgs + heavyDiv(1) + compose(composeRows) + hint(1) = height
 	msgRows := m.height - composeRows - 4
@@ -296,6 +300,56 @@ func (m tuiModel) View() string {
 
 // renderMsg returns the lines for one chat message.
 // Long text is word-wrapped to fit within w.
+func (m tuiModel) renderWaitingPopover(header, heavyDiv string, w int) string {
+	// Build the popover box content.
+	boxW := 36
+	if boxW > w-4 {
+		boxW = w - 4
+	}
+
+	otpBig := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(colPink).
+		Width(boxW).
+		Align(lipgloss.Center).
+		Render(m.otp)
+
+	labelStyle := lipgloss.NewStyle().
+		Foreground(colDimBlue).
+		Width(boxW).
+		Align(lipgloss.Center)
+
+	waitStyle := lipgloss.NewStyle().
+		Foreground(colCyan).
+		Italic(true).
+		Width(boxW).
+		Align(lipgloss.Center)
+
+	boxContent := strings.Join([]string{
+		"",
+		labelStyle.Render("share this code with your partner"),
+		"",
+		otpBig,
+		"",
+		waitStyle.Render("waiting for connection..."),
+		"",
+	}, "\n")
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder()).
+		BorderForeground(colDarkTeal).
+		Padding(0, 2).
+		Render(boxContent)
+
+	// Center the box vertically and horizontally.
+	h := m.height - 3 // leave room for header + hint
+	centered := lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, box)
+
+	hint := stylePrompt.Render("  ctrl+c to quit")
+
+	return strings.Join([]string{header, heavyDiv, centered, hint}, "\n")
+}
+
 func renderMsg(cm chatMsg, w int) []string {
 	if cm.isSystem {
 		return []string{styleSystem.Render("  ∙ " + cm.text)}
