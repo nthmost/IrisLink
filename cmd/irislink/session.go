@@ -162,7 +162,7 @@ func runTUIWithClient(otp, handle, mode string, client *transport.Client, incomi
 		cwd = "."
 	}
 	m := initialModel(otp, handle, mode, client, incoming, cfg, cwd, showWaiting)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
 	}
