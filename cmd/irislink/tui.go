@@ -101,7 +101,10 @@ type chatMsg struct {
 }
 
 type incomingEnvMsg struct{ env transport.Envelope }
-type selfSentMsg struct{ text string }
+type selfSentMsg struct {
+	text   string
+	blocks []transport.ContextBlock
+}
 type sendErrMsg struct{ err error }
 type apiKeyReceivedMsg struct{ key string }
 
@@ -365,6 +368,9 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text:   msg.text,
 			isSelf: true,
 		})
+		for _, b := range msg.blocks {
+			m.sentFiles[b.Source] = true
+		}
 
 	case sendErrMsg:
 		m.addSystem("send error: " + msg.err.Error())
@@ -385,22 +391,58 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // sendMsg builds, mediates if needed, selects context, and publishes.
+// Mediate and SelectContext run concurrently; both are bounded by a 15s timeout.
 func (m *tuiModel) sendMsg(text string) tea.Cmd {
+	apiKey := m.cfg.ClaudeAPIKey
+	model := m.cfg.ClaudeModel
+	mode := m.mode
+	cwd := m.cwd
+	client := m.client
+
 	return func() tea.Msg {
 		finalText := text
 		var blocks []transport.ContextBlock
 
-		if m.cfg.ClaudeAPIKey != "" {
-			if m.mode != "relay" {
-				if rewritten, err := claude.Mediate(m.cfg.ClaudeAPIKey, m.cfg.ClaudeModel, m.mode, text); err == nil && rewritten != "" {
-					finalText = rewritten
-				}
+		if apiKey != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+
+			type mediateResult struct{ text string }
+			type contextResult struct{ blocks []transport.ContextBlock }
+
+			mediateCh := make(chan mediateResult, 1)
+			contextCh := make(chan contextResult, 1)
+
+			if mode != "relay" {
+				go func() {
+					if rewritten, err := claude.Mediate(apiKey, model, mode, text); err == nil && rewritten != "" {
+						mediateCh <- mediateResult{rewritten}
+					} else {
+						mediateCh <- mediateResult{text}
+					}
+				}()
+			} else {
+				mediateCh <- mediateResult{text}
 			}
-			if ctx, err := claude.SelectContext(m.cfg.ClaudeAPIKey, text, m.cwd); err == nil {
-				blocks = ctx
-				for _, b := range blocks {
-					m.sentFiles[b.Source] = true
+
+			go func() {
+				if blks, err := claude.SelectContext(apiKey, text, cwd); err == nil {
+					contextCh <- contextResult{blks}
+				} else {
+					contextCh <- contextResult{}
 				}
+			}()
+
+			select {
+			case r := <-mediateCh:
+				finalText = r.text
+			case <-ctx.Done():
+			}
+
+			select {
+			case r := <-contextCh:
+				blocks = r.blocks
+			case <-ctx.Done():
 			}
 		}
 
@@ -409,10 +451,10 @@ func (m *tuiModel) sendMsg(text string) tea.Cmd {
 			Text:    finalText,
 			Context: blocks,
 		}
-		if err := m.client.Publish(context.Background(), env); err != nil {
+		if err := client.Publish(context.Background(), env); err != nil {
 			return sendErrMsg{err: err}
 		}
-		return selfSentMsg{text: finalText}
+		return selfSentMsg{text: finalText, blocks: blocks}
 	}
 }
 
