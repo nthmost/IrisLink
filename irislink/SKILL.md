@@ -1,118 +1,78 @@
 ---
 name: irislink
-description: Use /irislink to pair two Claude Code sessions via a six-character OTP and relay or mediate messages between them through IrisLink
+description: Use /irislink to start an encrypted chat session with another person using the IrisLink TUI
 ---
 
 # IrisLink Skill
 
-IrisLink pairs two Claude Code sessions through a short-lived room keyed by a six-character one-time pad. The `irislink` binary handles all plumbing — room lifecycle, hook registration, and polling. This skill is the conversational interface.
+IrisLink is a standalone TUI binary. This skill's job is to check that it is installed and then hand off to the binary. Everything else — the chat interface, file context, Claude login, mediation — happens inside the TUI.
 
-If `irislink` is not on PATH:
+## Prerequisites
+
+IrisLink requires an MQTT broker reachable by both parties. Configure `~/.irislink/config.json`:
+
+```json
+{
+  "broker_url": "mqtt://homeassistant.local:1883",
+  "broker_user": "irislink",
+  "broker_pass": "yourpassword"
+}
+```
+
+## Installation Check
+
+Before running any IrisLink command, verify the binary is available:
+
+```bash
+which irislink
+```
+
+If not found, install from source (recommended — module proxy may lag behind):
+
+```bash
+git clone https://github.com/nthmost/IrisLink
+cd IrisLink
+go build -o ~/go/bin/irislink ./cmd/irislink/
+```
+
+Or via `go install`:
+
 ```bash
 go install github.com/nthmost/IrisLink/cmd/irislink@latest
 ```
 
-## Prerequisites
+Make sure `~/go/bin` is on `PATH`.
 
-IrisLink requires no server. Just a `~/.irislink/config.json` pointing at an MQTT broker:
+## Usage
 
-```json
-{"broker_url": "mqtt://homeassistant.local:1883", "broker_user": "irislink", "broker_pass": "..."}
-```
+### `/irislink create [handle]`
 
----
-
-## Subcommands
-
-### `/irislink create [mode]`
-
-1. Ask the user for their handle (default: `operator`).
-2. Run:
-   ```bash
-   irislink create <handle> [mode]
-   ```
-3. Display the output — the OTP box. Tell the user to share it with their partner.
-
----
-
-### `/irislink join <OTP> [mode]`
-
-1. Ask the user for their handle (default: `operator`).
-2. Run:
-   ```bash
-   irislink join <OTP> <handle> [mode]
-   ```
-3. Display the output — the connected banner.
-
----
-
-### `/irislink leave`
+Ask the user for their handle (default: `operator`), then run:
 
 ```bash
-irislink leave
+irislink create <handle>
 ```
 
-Display the confirmation.
+The TUI launches. It shows the 6-character OTP and waits for the other person to join. Tell the user to share the code out-of-band.
 
----
+### `/irislink join <OTP> [handle]`
 
-### `/irislink mode <relay|mediate|game-master>`
+Ask the user for their handle (default: `operator`), then run:
 
 ```bash
-OTP=$(python3 -c "import json; print(json.load(open('$HOME/.irislink/rooms/pending.json'))['otp'])")
-curl -s -X POST http://localhost:4173/rooms/$OTP/mode \
-  -H "Content-Type: application/json" \
-  -d '{"mode": "<mode>"}'
-python3 -c "
-import json, pathlib
-p = pathlib.Path('$HOME/.irislink/rooms/$OTP.meta')
-d = json.loads(p.read_text()); d['mode'] = '<mode>'; p.write_text(json.dumps(d))
-"
+irislink join <OTP> <handle>
 ```
 
-Confirm the mode switch.
+The TUI opens and both sides are connected.
 
----
+### That's it
 
-### `/irislink status`
-
-```bash
-OTP=$(python3 -c "import json; print(json.load(open('$HOME/.irislink/rooms/pending.json'))['otp'])")
-irislink events $(irislink pending connector) $OTP 0
-tail -10 ~/.irislink/rooms/$OTP.log 2>/dev/null || echo "(no messages yet)"
-```
-
----
-
-### `/irislink` or `/irislink help`
-
-If a room is active, show status. Otherwise list subcommands.
-
----
-
-## Mediation Modes
-
-| Mode | Behaviour |
-|------|-----------|
-| `relay` | Pass-through, no LLM |
-| `mediate` | Rewrites for clarity via `loki/qwen-coder-14b` |
-| `game-master` | Adds GM narrative via `loki/qwen3-coder-30b` |
-
----
-
-## OTP Alphabet
-
-Valid: `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (no 0, 1, I, O). Always uppercase before use.
-
----
+The binary handles everything from here: chat, file context, Claude login, mode switching, and disconnect. The TUI has a built-in `/help` command.
 
 ## Error Reference
 
 | Situation | Fix |
 |-----------|-----|
-| `irislink: command not found` | `go install github.com/nthmost/IrisLink/cmd/irislink@latest` |
-| Connector not responding | `irislink proxy &` |
-| Server not responding | `irislink server &` |
-| 404 on join | Code expired — ask partner for a new one |
-| 409 on join | Room full |
-| 410 anywhere | Room expired — leave and start fresh |
+| `irislink: command not found` | Install per the instructions above |
+| `cannot connect to broker` | Check `broker_url` in `~/.irislink/config.json` |
+| Code expired or wrong | Ask your partner to run `irislink create` again for a fresh code |

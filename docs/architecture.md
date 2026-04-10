@@ -5,151 +5,167 @@ Current implementation as of April 2026.
 ## Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Person A's machine                                          │
-│                                                             │
-│  ┌──────────────┐    hook     ┌───────────────────────────┐ │
-│  │ Claude Code  │ ──────────► │  irislink hook            │ │
-│  │ (skill)      │             │  (UserPromptSubmit)       │ │
-│  └──────┬───────┘             └──────────────┬────────────┘ │
-│         │ /irislink cmds                     │ additionalContext
-│         ▼                                   ▼              │
-│  ┌──────────────┐  REST   ┌───────────────────────────────┐ │
-│  │  irislink    │ ──────► │  irislink proxy               │ │
-│  │  (CLI)       │         │  localhost:8357               │ │
-│  └──────────────┘         └──────────────┬────────────────┘ │
-│                                          │ HTTP             │
-└──────────────────────────────────────────┼─────────────────┘
-                                           │
-                              ┌────────────▼────────────┐
-                              │  irislink server        │
-                              │  localhost:4173         │
-                              │  (rendezvous)           │
-                              └────────────┬────────────┘
-                                           │
-┌──────────────────────────────────────────┼─────────────────┐
-│  Person B's machine                      │                  │
-│                                          │ HTTP             │
-│  ┌──────────────┐         ┌─────────────▼─────────────────┐ │
-│  │  irislink    │ ──────► │  irislink proxy               │ │
-│  │  (CLI)       │  REST   │  localhost:8357               │ │
-│  └──────────────┘         └──────────────┬────────────────┘ │
-│                                          │ additionalContext │
-│  ┌──────────────┐    hook  ┌─────────────▼─────────────────┐ │
-│  │ Claude Code  │ ◄─────── │  irislink hook                │ │
-│  │ (skill)      │          │  (UserPromptSubmit)           │ │
-│  └──────────────┘          └───────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
+  Person A terminal                        Person B terminal
+  ─────────────────                        ─────────────────
+  irislink create alice                    irislink join ABC123 bob
+        │                                        │
+        ▼                                        ▼
+  ┌─────────────┐    encrypted MQTT    ┌─────────────────┐
+  │ irislink    │ ──────────────────► │  irislink TUI   │
+  │ TUI (alice) │ ◄────────────────── │  (bob)          │
+  └──────┬──────┘                     └────────┬────────┘
+         │                                     │
+         │ optional                            │ optional
+         ▼                                     ▼
+  ┌──────────────┐                    ┌──────────────────┐
+  │ Anthropic    │                    │  Anthropic       │
+  │ Claude API   │                    │  Claude API      │
+  │ (context +   │                    │  (context +      │
+  │  mediation)  │                    │   mediation)     │
+  └──────────────┘                    └──────────────────┘
+                         │
+              ┌──────────▼──────────┐
+              │   MQTT broker       │
+              │   (Mosquitto, HA,   │
+              │    HiveMQ, etc.)    │
+              └─────────────────────┘
 ```
 
-## Binary structure
+The binary is fully self-contained. There is no IrisLink server. The MQTT broker is commodity infrastructure that sees only ciphertext.
 
-Everything is a single binary: `irislink` (`cmd/irislink/main.go`).
+## Key Derivation
 
-```
-cmd/irislink/
-└── main.go              CLI dispatch + all subcommand logic
+The OTP is the only shared secret. Everything else is derived from it before any network connection is made.
 
-internal/
-├── crypto/crypto.go     OTP generation, HKDF-SHA256 room_id derivation
-├── proxy/proxy.go       Connector proxy HTTP handler
-├── server/server.go     Rendezvous server HTTP handler
-└── state/state.go       pending.json + config.json read/write
-```
+| Output | HKDF inputs | Length | Use |
+|--------|-------------|--------|-----|
+| `room_id` | IKM=OTP, salt=`irislink:v0`, info=`irislink-room` | 16 bytes → 32-char hex | MQTT topic namespace |
+| `enc_key` | IKM=OTP, salt=`irislink:v0`, info=`irislink-e2e-key` | 32 bytes | NaCl secretbox key |
 
-Dependencies: `golang.org/x/crypto` for HKDF. Everything else is stdlib.
+Hash function: HKDF-SHA256 (`golang.org/x/crypto/hkdf`).
 
-## Rendezvous server (`irislink server`)
+The OTP itself never reaches the broker. Topic names use `room_id`. MQTT client IDs are random UUIDs.
 
-- In-memory `map[string]*room` protected by `sync.RWMutex`
-- Room TTL: 15 minutes, reset on join and on new message
-- Background goroutine sweeps expired rooms every 60 seconds
-- OTP validated on every endpoint via regex `^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$`
-- Room phases derived on read: `waiting → joined → active → closed`
+## Envelope Structure
 
-Room state shape:
+The cleartext payload that gets encrypted on the wire:
 
 ```go
-type room struct {
-    OTP          string
-    Mode         string        // relay | mediate | game-master
-    Participants []Participant // max 2; status: present | joined
-    Messages     []Message     // status: pending | acknowledged
-    CreatedAt    int64         // unix ms
-    ExpiresAt    int64         // unix ms
-    ClosedAt     *int64        // nil until closed
+type ContextBlock struct {
+    Source  string `json:"source"`   // relative file path
+    Content string `json:"content"`  // excerpt (max 500 chars)
+}
+
+type Envelope struct {
+    Sender    string         `json:"sender"`
+    Text      string         `json:"text"`
+    Timestamp int64          `json:"timestamp"`  // Unix milliseconds
+    Type      string         `json:"type"`       // "message" | "presence" | "control"
+    Context   []ContextBlock `json:"context,omitempty"`
 }
 ```
 
-## Connector proxy (`irislink proxy`)
+On publish: `json.Marshal(Envelope)` → `NaCl secretbox.Seal` → random 24-byte nonce prepended → MQTT payload.
+On receive: strip nonce → `secretbox.Open` → `json.Unmarshal`. Messages that fail decryption are silently dropped.
 
-Thin HTTP proxy running on `localhost:8357` (configurable). Stateless — reads `~/.irislink/rooms/pending.json` to know which room is active.
+## MQTT Topics
 
-| Endpoint | Action |
-|----------|--------|
-| `GET /status` | Returns version + `room_attached` bool |
-| `GET /rooms/pending.json` | Serves pending.json (for lobby) |
-| `POST /message` | Forwards `{room_otp, sender, text}` → `POST /rooms/:otp/messages` |
-| `GET /events?room_otp=X&since=Y` | Fetches room state, filters messages where `timestamp > since`, returns with cursor |
-| `POST /ack` | Forwards `{room_otp, message_id}` → `POST /rooms/:otp/messages/:id/ack` |
+All topics are namespaced by `room_id` (derived from OTP — never the OTP itself):
 
-The `since` parameter is a Unix millisecond timestamp. The response includes `next` (highest timestamp seen), `phase`, `ttlSeconds`, and `waitingOn`.
+| Topic | Purpose |
+|-------|---------|
+| `irislink/<room_id>/messages` | Chat messages and context blocks |
+| `irislink/<room_id>/presence` | Join / leave announcements |
+| `irislink/<room_id>/control` | Reserved for future control messages |
 
-## Skill (`irislink/irislink.md`)
+All subscriptions use QoS 1. The broker retains no message history.
 
-A Claude Code skill — a markdown file with YAML frontmatter that instructs Claude how to behave when `/irislink` is invoked.
+## Context Flow
 
-Key design decisions:
+**Sending (when Claude API key is set):**
 
-**Binary calls instead of inline logic.** The skill tells Claude to run `irislink <subcommand>` rather than constructing HTTP calls manually. This avoids path issues, Python/pip fragmentation, and JSON-parsing in bash.
+1. User presses Alt+Enter to send.
+2. `claude.SelectContext(apiKey, text, cwd)` is called in a goroutine.
+3. Claude reads files in the CWD (up to 50 KB total, skipping binaries, `.git`, `node_modules`, `vendor`, `dist`, `build`, `irislink-context`).
+4. A prompt asks Claude which files or excerpts are most relevant to the message.
+5. Claude returns a JSON array of `{"source": "<path>", "content": "<excerpt>"}`.
+6. If mode is `mediate` or `game-master`, `claude.Mediate` rewrites or annotates the message text first.
+7. The final `Envelope` (with `Context []ContextBlock`) is encrypted and published.
+8. Files included in the context glow cyan in the sidebar (`sentFiles` map).
 
-**Background poller.** After `create` or `join`, the skill starts a bash loop that calls `irislink events` every 2 seconds and appends inbound messages to `~/.irislink/rooms/<otp>.log`. Claude tails the log to surface new messages.
+**Receiving:**
 
-**UserPromptSubmit hook.** The `irislink hook` subcommand is registered as a Claude Code hook on `create`/`join` and removed on `leave`. It reads `pending.json` on every user message; if a session is active, it injects `additionalContext` telling Claude to relay the message first. Explicit `/irislink` commands bypass the hook.
+1. Incoming envelope is decrypted and unmarshalled.
+2. If `env.Context` is non-empty, `fileContext(cwd, sender, blocks)` fires.
+3. Each block is written to `<cwd>/irislink-context/<sender>/<timestamp>-<filename>`.
 
-## OTP and room_id
+## Auth Flow (Claude API Key)
 
-OTPs are 6 characters from Crockford Base32 (`ABCDEFGHJKLMNPQRSTUVWXYZ23456789`). Generated with `crypto/rand`.
+IrisLink avoids storing API keys in the skill or sending them over the network. Instead:
 
-`room_id` is derived via HKDF-SHA256:
+1. User tabs to the `[ LOGIN ]` panel in the TUI and presses Enter.
+2. `startAuthReceiver()` binds a local HTTP server on a random port (`127.0.0.1:<port>`).
+3. The binary opens a browser to `http://localhost:<port>`.
+4. The browser page instructs the user to get an API key from `platform.claude.com/settings/keys` and paste it into a form.
+5. On POST, the server sends the key over a Go channel (`keyCh`) and shuts itself down.
+6. The TUI receives `apiKeyReceivedMsg`, stores the key in `cfg.ClaudeAPIKey`, and persists it to `~/.irislink/config.json`.
 
-```
-IKM  = otp.upper()
-salt = "irislink:v0"
-info = "irislink-room"
-len  = 16 bytes → 32-char lowercase hex
-```
+The key is only ever transmitted between `localhost` and the user's own browser. It is never sent to the MQTT broker or any IrisLink endpoint.
 
-The server currently uses the OTP directly as its room key (not the derived `room_id`). The `room_id` is computed client-side and stored in `pending.json` for future use (signed envelopes, E2E encryption).
+## OTP Alphabet
 
-## Mediation
+OTPs are 6 characters from Crockford Base32: `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`. Characters `0`, `1`, `I`, and `O` are excluded to avoid visual confusion. Generated with `crypto/rand`.
 
-`irislink mediate <mode> <text>` calls the LiteLLM proxy at `spartacus.local:4000`:
-
-| Mode | Model | System prompt |
-|------|-------|--------------|
-| `relay` | — | Pass-through, no LLM call |
-| `mediate` | `loki/qwen-coder-14b` | Rewrite for clarity and consideration |
-| `game-master` | `loki/qwen3-coder-30b` | Add narrative flourish or GM prompt |
-
-## State files
+## State Files
 
 ```
 ~/.irislink/
-├── config.json          {"connector_url": "http://localhost:8357"}
+├── config.json         broker URL/credentials + claude_api_key
 └── rooms/
-    ├── pending.json     {"otp": "ABC123", "room_id": "1f2e3c4a..."}
-    ├── <otp>.meta       {"handle": "north-star", "mode": "relay", "cursor": 1234567890}
-    ├── <otp>.log        incoming messages, one per line
-    └── <otp>.pid        background poller PID
+    ├── pending.json    active room: {"otp": "ABC123", "room_id": "1f2e3c..."}
+    └── <otp>.meta      {"handle": "alice", "mode": "relay", "cursor": 0}
 ```
 
-`pending.json` is the single source of truth for whether a session is active. Both the hook and the skill read it. `clear_pending` (`irislink pending clear`) signals session end.
+`pending.json` is the single source of truth for whether a session is active. It is written on `create` / `join` and removed on `leave`. The `.meta` file persists handle and mode.
 
-## What's not implemented yet
+The `irislink leave` command (non-TUI) publishes a `presence/left` envelope, then clears `pending.json` and removes the `.meta` file. Inside the TUI, `/leave` quits bubbletea and the same cleanup runs in `session.go`.
 
-- **WebSocket relay** — currently the connector polls the rendezvous every 2s. The server has no push mechanism.
-- **Signed envelopes** — `X-IrisLink-Signature` header is defined in the spec but not validated by the server.
-- **E2E encryption** — room_id derivation is in place; the libsodium layer is not.
-- **Persistent storage** — server state is in-memory; a restart loses all rooms.
-- **Multi-machine rendezvous** — currently assumes both people can reach the same `localhost:4173`. A hosted instance at `irislink.nthmost.net` is the next step.
+## Source Layout
+
+```
+IrisLink/
+├── cmd/irislink/
+│   ├── main.go         CLI dispatch; low-level debug subcommands (otp, room-id,
+│   │                   pending, send, mediate, version)
+│   ├── session.go      runCreate / runJoin / runLeave; wraps TUI launch
+│   ├── tui.go          Bubbletea model, view, update; sidebar file tree;
+│   │                   slash command handler; context filing
+│   └── auth.go         Local HTTP server for browser-based API key capture
+├── internal/
+│   ├── claude/
+│   │   └── claude.go   SelectContext (file walker + Claude prompt) and
+│   │                   Mediate (rewrite / GM annotation)
+│   ├── crypto/
+│   │   └── crypto.go   GenerateOTP, DeriveRoomID, DeriveEncKey, Seal, Open
+│   ├── transport/
+│   │   └── mqtt.go     MQTT v5 client (paho.golang); Envelope and ContextBlock
+│   │                   types; encrypted Publish / handleMessage
+│   └── state/
+│       └── state.go    Config, Pending, Meta structs; Read/Write helpers for
+│                       config.json, pending.json, <otp>.meta
+├── irislink/
+│   └── SKILL.md        Claude Code skill — install helper only
+└── docs/
+    └── architecture.md (this file)
+```
+
+## Dependencies
+
+| Package | Role |
+|---------|------|
+| `github.com/charmbracelet/bubbletea` | TUI framework |
+| `github.com/charmbracelet/bubbles` | Textarea and textinput widgets |
+| `github.com/charmbracelet/lipgloss` | Terminal styling |
+| `github.com/eclipse/paho.golang` | MQTT v5 client |
+| `github.com/google/uuid` | Random client IDs |
+| `golang.org/x/crypto` | HKDF-SHA256 and NaCl secretbox |

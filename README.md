@@ -1,68 +1,55 @@
 # IrisLink
 
-Pair two Claude Code sessions with a six-character code. Once connected, messages flow between them through Claude — optionally rewritten, mediated, or narrated by a game-master persona.
+IrisLink is a standalone terminal UI for two people to communicate over an encrypted MQTT channel, with optional Claude AI context attachment and mediation. No accounts, no hosted server — just an MQTT broker and a six-character code.
+
+## TUI Layout
 
 ```
-Person A                          Person B
-────────                          ────────
-/irislink create                  /irislink join K7NP3Q
-→ code: K7NP3Q   ── share ──→
+IRISLINK  ABC123  relay  alice
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-hey, can you look at this diff?   [relay]  hey, can you look at this diff?
-                                  sure, let me check...
-[relay]  sure, let me check...
+  bob  02 Apr 15:32                    │ context
+  hey, did you push the fix?           │ ────────────────────────
+                                       │ ▶ cmd/ (4)
+  you  02 Apr 15:33                    │ ▶ internal/ (8)
+  just pushed — try pulling            │   go.mod
+                                       │   README.md
+  ∙ bob joined                         │
+                                       │ ────────────────────────
+─────────────────────────────────────  │   [ LOGIN ]
+  write something...                   │   claude context
+  (opt+enter to send, /help)           │
+
+────────────────────────────────────────────────────────────────
+  opt+enter to send  •  tab: browse files  •  /help
 ```
 
-## How it works
+Left pane: scrolling message history + multi-line compose area.
+Right sidebar: file tree of the current working directory (files sent as context glow cyan), with the Claude auth panel at the bottom.
 
-1. Person A runs `/irislink create` → gets a 6-char OTP, connects to the MQTT broker.
-2. They share the code with Person B out-of-band (chat, clipboard, yell across the office).
-3. Person B runs `/irislink join <OTP>` → both sides subscribe to the same encrypted room topic.
-4. A `UserPromptSubmit` hook fires on every message. It relays outbound messages and surfaces inbound — no `/irislink` prefix required once connected.
-5. `/irislink leave` disconnects and removes the hook.
+## Quick Start
 
-## Transport and security
+### Install
 
-IrisLink uses MQTT as its transport. It requires no server of its own — point it at any existing MQTT broker (Home Assistant's Mosquitto add-on, a local Mosquitto instance, HiveMQ, etc.).
+From source (recommended — module proxy may lag):
 
-**E2E encryption:** every payload is encrypted with NaCl secretbox (ChaCha20-Poly1305) using a key derived from the OTP via HKDF-SHA256. The broker operator cannot read message content.
+```bash
+git clone https://github.com/nthmost/IrisLink
+cd IrisLink
+go build -o ~/go/bin/irislink ./cmd/irislink/
+```
 
-**Privacy:** topic names use a HKDF-derived `room_id`, never the OTP itself. MQTT client IDs are random UUIDs. The OTP never reaches the broker.
-
-## Install
-
-**One-liner** (requires Go 1.21+):
+Or via `go install` (requires Go 1.21+):
 
 ```bash
 go install github.com/nthmost/IrisLink/cmd/irislink@latest
 ```
 
-Make sure `~/go/bin` is on your `PATH` (add to `~/.zshrc` or `~/.bashrc`):
+Make sure `~/go/bin` is on your `PATH`.
 
-```bash
-export PATH="$HOME/go/bin:$PATH"
-```
+### Configure
 
-**Install the skill:**
-
-```bash
-mkdir -p ~/.claude/skills/irislink
-curl -fsSL https://raw.githubusercontent.com/nthmost/IrisLink/main/irislink/SKILL.md \
-  -o ~/.claude/skills/irislink/SKILL.md
-```
-
-**No Go on the target machine?** Cross-compile from a machine that has it:
-
-```bash
-GOOS=linux GOARCH=amd64 go build -o irislink-linux ./cmd/irislink
-scp irislink-linux user@host:~/bin/irislink
-```
-
-Common targets: `GOOS=linux GOARCH=arm64` (Raspberry Pi, Apple Silicon Linux), `GOOS=darwin GOARCH=arm64` (Apple Silicon Mac).
-
-## Broker setup
-
-IrisLink needs an MQTT broker reachable by both parties. Point it at one in `~/.irislink/config.json`:
+Create `~/.irislink/config.json` on both machines, pointing at the same broker:
 
 ```json
 {
@@ -72,146 +59,142 @@ IrisLink needs an MQTT broker reachable by both parties. Point it at one in `~/.
 }
 ```
 
-Leave out `broker_user`/`broker_pass` if the broker allows anonymous access.
+### Start a session
 
-### Home Assistant (Mosquitto add-on)
+**Person A** — creates the room:
 
-HA's Mosquitto add-on authenticates via HA's own user system. To create a dedicated IrisLink user:
+```bash
+irislink create alice
+```
 
-1. Go to **Settings → People → Users** (enable Advanced Mode in your profile first).
-2. Click **Add User** — name it `irislink`, set a password, role: **User**.
-3. That username/password works directly for MQTT auth.
-4. To restrict IrisLink to only the `irislink/#` topic namespace, add an ACL to the Mosquitto add-on config in **Settings → Add-ons → Mosquitto broker → Configuration**:
+The TUI shows a 6-character OTP and waits. Share it with Person B out-of-band.
+
+**Person B** — joins with the code:
+
+```bash
+irislink join ABC123 bob
+```
+
+Both TUIs open. Start typing.
+
+## TUI Controls
+
+| Key | Action |
+|-----|--------|
+| Alt+Enter (Opt+Enter on macOS) | Send message |
+| Tab | Cycle focus: compose → file tree → claude panel |
+| Up / Down (sidebar focused) | Navigate file tree |
+| Enter / Space (sidebar focused) | Expand or collapse a directory |
+| Enter (claude panel focused) | Open browser auth (or logout if already logged in) |
+| Ctrl+C | Quit immediately |
+
+## Slash Commands
+
+| Command | Effect |
+|---------|--------|
+| `/leave` | Disconnect and quit |
+| `/mode relay` | Pass-through, no LLM (default) |
+| `/mode mediate` | Claude rewrites messages for clarity before sending |
+| `/mode game-master` | Claude adds a narrative GM note to each outgoing message |
+| `/help` | Show key bindings and available commands |
+
+## Modes
+
+| Mode | What happens |
+|------|--------------|
+| `relay` | Messages sent as-is. No LLM call. |
+| `mediate` | Claude rewrites outgoing messages to be clearer and more considerate (requires API key). |
+| `game-master` | Claude appends a narrative GM note to each outgoing message (requires API key). |
+
+Mode is per-session and local — each person sets their own.
+
+## Claude AI Integration
+
+Tab to the `[ LOGIN ]` button and press Enter. IrisLink opens a browser page on a local port with instructions to get an API key from `platform.claude.com/settings/keys`. Paste the key in the browser form; the TUI receives it automatically and stores it in `~/.irislink/config.json`.
+
+Once logged in:
+
+- **Context selection** — on every send, Claude reads files in the current working directory, picks relevant excerpts, and attaches them to the outgoing envelope. Files that were included glow cyan in the sidebar.
+- **Context filing** — context blocks received from your partner are written to `irislink-context/<sender>/` in the CWD.
+- **Mediation** — active only when mode is `mediate` or `game-master`.
+
+To log out, tab to the claude panel and press Enter again.
+
+## Broker Setup
+
+Both parties need to reach the same MQTT v5 broker. The OTP and encryption key never reach the broker — only opaque ciphertext is published.
+
+### Home Assistant Mosquitto add-on
+
+1. Install the Mosquitto add-on from the add-on store.
+2. In HA, go to **Settings → People → Users** (enable Advanced Mode in your profile first).
+3. Click **Add User** — name it `irislink`, set a password, role: **User**.
+4. Set `broker_url` to `mqtt://homeassistant.local:1883` in `config.json`.
+
+Optional ACL to restrict the user to the `irislink/#` namespace:
 
 ```yaml
+# Mosquitto add-on configuration
 customize:
   active: true
   folder: mosquitto
 ```
 
-Then create `/config/mosquitto/acl.conf`:
-
+`/config/mosquitto/acl.conf`:
 ```
 user irislink
 topic readwrite irislink/#
 ```
-
-And set in the Mosquitto add-on config:
-
-```yaml
-acl_file: /config/mosquitto/acl.conf
-```
-
-Restart the add-on to apply.
 
 ### Standalone Mosquitto
 
 ```bash
-# Create user
-mosquitto_passwd -c /etc/mosquitto/passwd irislink
+# macOS
+brew install mosquitto && brew services start mosquitto
 
-# /etc/mosquitto/conf.d/irislink.conf
-password_file /etc/mosquitto/passwd
-acl_file /etc/mosquitto/acl
-
-# /etc/mosquitto/acl
-user irislink
-topic readwrite irislink/#
+# Debian/Ubuntu
+sudo apt install mosquitto mosquitto-clients
+sudo systemctl enable --now mosquitto
 ```
 
-## Quick start
+Default config allows anonymous connections on port 1883, which is fine for local use. For password auth, see the [Mosquitto documentation](https://mosquitto.org/documentation/).
 
-**Both machines** need a `~/.irislink/config.json` pointing at the same broker.
+Public brokers (HiveMQ, EMQX Cloud, etc.) also work — use `mqtt://broker.hivemq.com:1883` for quick testing.
 
-**Person A's Claude session:**
-```
-/irislink create
-```
+## Config Reference
 
-Claude shows a 6-char code. Share it with Person B.
+`~/.irislink/config.json`
 
-**Person B's Claude session:**
-```
-/irislink join <CODE>
-```
-
-Once connected, type normally — the hook relays everything automatically.
-
-```
-/irislink leave    # when done
-```
-
-## Mediation modes
-
-Switch with `/irislink mode <relay|mediate|game-master>` at any time.
-
-| Mode | What Claude does |
-|------|-----------------|
-| `relay` | Pass-through. Messages arrive exactly as sent. No LLM call. |
-| `mediate` | Rewrites each outbound message to be clearer and more considerate. |
-| `game-master` | Adds a brief narrative flourish or creative prompt after each message. |
-
-Mediation uses LiteLLM. Configure the endpoint in `~/.irislink/config.json` (default: `http://spartacus.local:4000`).
-
-## Config reference
-
-`~/.irislink/config.json`:
-
-```json
-{
-  "broker_url": "mqtt://homeassistant.local:1883",
-  "broker_user": "irislink",
-  "broker_pass": "yourpassword"
-}
-```
-
-| Key | Default | Description |
-|-----|---------|-------------|
+| Field | Default | Description |
+|-------|---------|-------------|
 | `broker_url` | `mqtt://localhost:1883` | MQTT broker URL (`mqtt://` or `mqtts://`) |
-| `broker_user` | — | Broker username (optional) |
-| `broker_pass` | — | Broker password (optional) |
+| `broker_user` | _(empty)_ | Broker username (optional) |
+| `broker_pass` | _(empty)_ | Broker password (optional) |
+| `claude_api_key` | _(empty)_ | Anthropic API key — set via TUI login or edit manually |
 
-## State files
+The `claude_api_key` field is also read from the `ANTHROPIC_API_KEY` environment variable on startup if not already set in config.
 
-All runtime state lives under `~/.irislink/`:
-
-```
-~/.irislink/
-├── config.json              # broker connection settings
-└── rooms/
-    ├── pending.json         # active room: {"otp": "...", "room_id": "..."}
-    ├── <otp>.meta           # {"handle": "...", "mode": "relay", "cursor": 0}
-    ├── <otp>.log            # incoming messages (kept after leave)
-    └── <otp>.pid            # background poller PID
-```
-
-## OTP alphabet
-
-Codes use Crockford Base32: `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`
-
-`0`, `1`, `I`, `O` are excluded to prevent visual confusion. Codes are case-insensitive on input.
-
-## Repo layout
+## Repo Layout
 
 ```
 IrisLink/
 ├── cmd/irislink/
-│   ├── main.go              # CLI entry point + low-level subcommands
-│   └── session.go           # create / join / leave / poll
+│   ├── main.go         CLI dispatch and debug subcommands
+│   ├── session.go      create / join / leave, TUI launcher
+│   ├── tui.go          Bubbletea TUI (model, view, update)
+│   └── auth.go         Local HTTP server for browser-based key capture
 ├── internal/
-│   ├── crypto/              # OTP generation, HKDF derivation, NaCl Seal/Open
-│   ├── transport/           # MQTT v5 client, encrypted pub/sub
-│   └── state/               # config.json + pending.json + meta I/O
+│   ├── claude/         Context selection and mediation via Anthropic API
+│   ├── crypto/         OTP generation, HKDF derivation, NaCl secretbox
+│   ├── transport/      MQTT v5 client and Envelope type
+│   └── state/          config.json, pending.json, and meta file R/W
 ├── irislink/
-│   └── SKILL.md             # Claude Code skill
+│   └── SKILL.md        Claude Code skill (install helper only)
 └── docs/
-    ├── architecture.md      # transport and crypto design
-    ├── ui-safety.md         # consent + safety UI guidelines
-    └── web-ui.md            # lobby UI design spec
+    └── architecture.md
 ```
 
-## What's next
+## Open Issues
 
-- nthmost/IrisLink#1 — pre-built binaries via goreleaser + GitHub Actions
-- nthmost/IrisLink#2 — MQTT transport (this is it, in progress)
-- nthmost/IrisLink#3 — SSH key-based identity + encryption upgrade
+- **[#1] goreleaser binaries** — pre-built binaries not yet published; build from source for now.
+- **[#3] SSH key identity** — `go install` uses the default git identity; if you need a specific SSH key for private forks, clone and build manually.
