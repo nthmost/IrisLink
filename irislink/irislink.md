@@ -171,7 +171,18 @@ Default mode: `relay`.
      > ~/.irislink/rooms/<OTP>.meta
    ```
 
-6. Show room state from join response.
+6. Show room state from join response, then display:
+
+   ```
+    ___      _     _     _       _
+   |_ _|_ __(_)___| |   (_)_ __ | | __
+    | || '__| / __| |   | | '_ \| |/ /
+    | || |  | \__ \ |___| | | | |   <
+   |___|_|  |_|___/_____|_|_| |_|_|\_\
+
+   connected  •  room: <OTP>  •  mode: <mode>
+   partner: <handle>
+   ```
 
 7. Start the poller.
 
@@ -263,6 +274,7 @@ HANDLE="$HANDLE"
 CONNECTOR="$CONNECTOR"
 LOG="$LOG"
 CURSOR=0
+PREV_PHASE=""
 
 while true; do
     RESULT=\$(irislink events \$CONNECTOR \$OTP \$CURSOR 2>/dev/null)
@@ -270,6 +282,21 @@ while true; do
 
     PHASE=\$(echo "\$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('phase',''))" 2>/dev/null)
     NEXT=\$(echo "\$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('next',0))" 2>/dev/null)
+
+    if [ "\$PHASE" = "active" ] && [ "\$PREV_PHASE" != "active" ]; then
+        echo ""
+        echo " ___      _     _     _       _    "
+        echo "|_ _|_ __(_)___| |   (_)_ __ | | __"
+        echo " | || '__| / __| |   | | '_ \| |/ /"
+        echo " | || |  | \__ \ |___| | | | |   < "
+        echo "|___|_|  |_|___/_____|_|_| |_|_|\_\\"
+        echo ""
+        echo "connected  •  room: $OTP"
+        echo "partner has joined — just type!"
+        echo ""
+    fi
+    PREV_PHASE=\$PHASE
+
     echo "\$RESULT" | python3 -c "
 import sys, json, datetime
 d = json.load(sys.stdin)

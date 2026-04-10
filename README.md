@@ -188,13 +188,10 @@ IrisLink/
 ├── irislink/
 │   ├── irislink.md          # Claude Code skill (install to ~/.claude/skills/)
 │   └── SKILL.md             # original spec (reference)
-├── docs/
-│   ├── rendezvous.md        # detailed protocol spec
-│   ├── ui-safety.md         # consent + safety UI guidelines
-│   └── web-ui.md            # lobby UI design spec
-├── connectors/              # Python prototype (superseded by Go binary)
-├── server/                  # Python prototype (superseded by Go binary)
-└── web/                     # React lobby prototype
+└── docs/
+    ├── rendezvous.md        # detailed protocol spec
+    ├── ui-safety.md         # consent + safety UI guidelines
+    └── web-ui.md            # lobby UI design spec
 ```
 
 ## What's next
