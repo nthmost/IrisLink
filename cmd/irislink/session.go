@@ -57,9 +57,10 @@ func runCreate() {
 		fatalf("cannot connect to broker: %v\nCheck broker_url in ~/.irislink/config.json", err)
 	}
 
-	fmt.Printf("\n╔══════════════════════╗\n║  IrisLink: %s   ║\n║  mode: %-13s║\n╚══════════════════════╝\n\nShare this code with your partner.\n\n", otp, mode)
-
-	runTUIWithClient(otp, handle, mode, client, incoming, cfg)
+	runTUIWithClient(otp, handle, mode, client, incoming, cfg,
+		"room created — share this code with your partner: "+otp,
+		"waiting for them to join...",
+	)
 
 	client.Disconnect(context.Background())
 	state.ClearPending()
@@ -111,9 +112,9 @@ func runJoin() {
 		fatal(err)
 	}
 
-	fmt.Printf("\nconnected  •  room: %s  •  mode: %s\n\n", otp, mode)
-
-	runTUIWithClient(otp, handle, mode, client, incoming, cfg)
+	runTUIWithClient(otp, handle, mode, client, incoming, cfg,
+		"connected to room "+otp+" — just write",
+	)
 
 	client.Disconnect(context.Background())
 	state.ClearPending()
@@ -151,12 +152,12 @@ func runLeave() {
 }
 
 // runTUIWithClient launches the bubbletea TUI with an already-connected client.
-func runTUIWithClient(otp, handle, mode string, client *transport.Client, incoming chan transport.Envelope, cfg state.Config) {
+func runTUIWithClient(otp, handle, mode string, client *transport.Client, incoming chan transport.Envelope, cfg state.Config, initMsgs ...string) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "."
 	}
-	m := initialModel(otp, handle, mode, client, incoming, cfg, cwd)
+	m := initialModel(otp, handle, mode, client, incoming, cfg, cwd, initMsgs...)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)

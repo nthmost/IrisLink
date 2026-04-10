@@ -80,7 +80,7 @@ type tuiModel struct {
 	height   int
 }
 
-func initialModel(otp, handle, mode string, client *transport.Client, incoming chan transport.Envelope, cfg state.Config, cwd string) tuiModel {
+func initialModel(otp, handle, mode string, client *transport.Client, incoming chan transport.Envelope, cfg state.Config, cwd string, initMsgs ...string) tuiModel {
 	ta := textarea.New()
 	ta.Placeholder = "write something... (ctrl+d to send, /help for commands)"
 	ta.Focus()
@@ -100,7 +100,13 @@ func initialModel(otp, handle, mode string, client *transport.Client, incoming c
 
 	ta.Prompt = ""
 
+	var msgs []chatMsg
+	for _, s := range initMsgs {
+		msgs = append(msgs, chatMsg{ts: time.Now(), text: s, isSystem: true})
+	}
+
 	return tuiModel{
+		messages: msgs,
 		compose:  ta,
 		otp:      otp,
 		handle:   handle,
@@ -242,9 +248,10 @@ func (m tuiModel) View() string {
 	divider := styleDivider.Render(strings.Repeat("─", w))
 	heavyDiv := styleDivider.Render(strings.Repeat("━", w))
 
-	// Header: IRISLINK [OTP] mode handle
+	// Header: IRISLINK  OTP  mode  handle
+	otpStyle := lipgloss.NewStyle().Bold(true).Foreground(colPink)
 	header := styleHeader.Render("IRISLINK") +
-		"  " + styleHeaderDim.Render("["+m.otp+"]") +
+		"  " + otpStyle.Render(m.otp) +
 		"  " + styleHeaderDim.Render(m.mode) +
 		"  " + styleHeaderDim.Render(m.handle)
 
