@@ -102,6 +102,7 @@ type chatMsg struct {
 type incomingEnvMsg struct{ env transport.Envelope }
 type selfSentMsg struct{ text string }
 type sendErrMsg struct{ err error }
+type apiKeyReceivedMsg struct{ key string }
 
 // ─── model ───────────────────────────────────────────────────────────────────
 
@@ -188,6 +189,12 @@ func (m *tuiModel) addSystem(msg string) {
 func waitForMsg(ch <-chan transport.Envelope) tea.Cmd {
 	return func() tea.Msg {
 		return incomingEnvMsg{env: <-ch}
+	}
+}
+
+func waitForAPIKey(ch <-chan string) tea.Cmd {
+	return func() tea.Msg {
+		return apiKeyReceivedMsg{key: <-ch}
 	}
 }
 
@@ -292,11 +299,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case m.focusArea == focusClaude && msg.Type == tea.KeyEnter:
 			skipCompose = true
 			if m.cfg.ClaudeAPIKey == "" {
-				// open browser, then show paste overlay
-				openBrowser(consoleURL)
-				m.loginOverlay = true
-				m.loginInput.SetValue("")
-				m.loginInput.Focus()
+				keyCh, port, err := startAuthReceiver()
+				if err != nil {
+					m.addSystem("could not start auth server: " + err.Error())
+				} else {
+					openBrowser(fmt.Sprintf("http://localhost:%d", port))
+					m.addSystem(fmt.Sprintf("browser opened — submit your key at localhost:%d", port))
+					cmds = append(cmds, waitForAPIKey(keyCh))
+				}
 			} else {
 				// logout
 				m.cfg.ClaudeAPIKey = ""
@@ -346,6 +356,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sendErrMsg:
 		m.addSystem("send error: " + msg.err.Error())
+
+	case apiKeyReceivedMsg:
+		m.cfg.ClaudeAPIKey = msg.key
+		state.WriteConfig(m.cfg) //nolint:errcheck
+		m.addSystem("logged in — Claude context enabled")
 	}
 
 	var composeCmd tea.Cmd
