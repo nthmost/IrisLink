@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -18,6 +19,23 @@ import (
 	"github.com/nthmost/IrisLink/internal/state"
 	"github.com/nthmost/IrisLink/internal/transport"
 )
+
+const consoleURL = "https://console.anthropic.com/settings/api-keys"
+
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", url)
+	default:
+		return
+	}
+	cmd.Start() //nolint:errcheck
+}
 
 // ─── colour palette ─────────────────────────────────────────────────────────
 
@@ -274,7 +292,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case m.focusArea == focusClaude && msg.Type == tea.KeyEnter:
 			skipCompose = true
 			if m.cfg.ClaudeAPIKey == "" {
-				// open login overlay
+				// open browser, then show paste overlay
+				openBrowser(consoleURL)
 				m.loginOverlay = true
 				m.loginInput.SetValue("")
 				m.loginInput.Focus()
@@ -668,13 +687,15 @@ func (m tuiModel) renderLoginOverlay(w int) string {
 	title := lipgloss.NewStyle().Foreground(colCyan).Bold(true).
 		Width(boxW).Align(lipgloss.Center).Render("CLAUDE LOGIN")
 	prompt := lipgloss.NewStyle().Foreground(colDimBlue).
-		Width(boxW).Align(lipgloss.Center).Render("paste your Anthropic API key")
+		Width(boxW).Align(lipgloss.Center).Render("browser opened → create or copy an API key")
+	urlLine := lipgloss.NewStyle().Foreground(colDimGray).Italic(true).
+		Width(boxW).Align(lipgloss.Center).Render(consoleURL)
 	hint := lipgloss.NewStyle().Foreground(colDimGray).Italic(true).
 		Width(boxW).Align(lipgloss.Center).Render("enter to confirm  •  esc to cancel")
 
 	input := lipgloss.NewStyle().Width(boxW).Align(lipgloss.Center).Render(m.loginInput.View())
 
-	boxContent := strings.Join([]string{"", title, "", prompt, "", input, "", hint, ""}, "\n")
+	boxContent := strings.Join([]string{"", title, "", prompt, urlLine, "", input, "", hint, ""}, "\n")
 	box := lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).
 		BorderForeground(colDarkTeal).
