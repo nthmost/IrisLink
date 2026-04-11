@@ -194,30 +194,81 @@ func Ask(apiKey, model, query string) (string, error) {
 	return callClaudeModel(apiKey, model, prompt)
 }
 
+// MediateResult is the structured response from Mediate.
+// If Send is true, Text is the (possibly rewritten) message to forward.
+// If Send is false, Text contains clarifying questions to show the sender locally.
+type MediateResult struct {
+	Send bool
+	Text string
+}
+
+// mediateJSON is the JSON shape Claude returns for mediate mode.
+type mediateJSON struct {
+	Action string `json:"action"` // "send" or "clarify"
+	Text   string `json:"text"`
+}
+
 // Mediate rewrites msg for clarity (mediate mode) or adds GM narrative
 // (game-master mode). Returns original msg if mode is relay or no API key.
+// In mediate mode, Claude may instead return clarifying questions (Send=false).
 // model may be "" to use the default mediation model.
-func Mediate(apiKey, model, mode, msg string) (string, error) {
+func Mediate(apiKey, model, mode, msg string) (MediateResult, error) {
+	passthrough := MediateResult{Send: true, Text: msg}
 	if apiKey == "" || mode == "relay" {
-		return msg, nil
+		return passthrough, nil
 	}
 	if model == "" {
 		model = modelMediate
 	}
 
-	var prompt string
 	switch mode {
 	case "mediate":
-		prompt = fmt.Sprintf(
-			"Rewrite the following message to be clearer and more considerate, keeping the original meaning. Output only the rewritten message, nothing else.\n\nMessage: %s",
-			msg)
+		prompt := fmt.Sprintf(`You are mediating a conversation to keep it constructive and clear.
+
+Message: %q
+
+If this message is clear and expresses a coherent intent (even if blunt or emotionally charged), rewrite it to be clearer and more considerate while preserving the core meaning.
+
+Only if the message is genuinely ambiguous — meaning you would need to make a significant guess about what the sender intends — ask 1-2 targeted clarifying questions instead. Set a high bar: most messages should be rewritten and sent.
+
+Respond with JSON only, no other text:
+{"action": "send", "text": "<rewritten message>"}
+or
+{"action": "clarify", "text": "<your 1-2 clarifying questions>"}`, msg)
+
+		raw, err := callClaudeModel(apiKey, model, prompt)
+		if err != nil {
+			return passthrough, err
+		}
+		// Extract JSON from response.
+		raw = strings.TrimSpace(raw)
+		if i := strings.Index(raw, "{"); i >= 0 {
+			raw = raw[i:]
+		}
+		if i := strings.LastIndex(raw, "}"); i >= 0 {
+			raw = raw[:i+1]
+		}
+		var result mediateJSON
+		if err := json.Unmarshal([]byte(raw), &result); err != nil {
+			// Parse failure: fall back to sending original.
+			return passthrough, nil
+		}
+		if result.Text == "" {
+			return passthrough, nil
+		}
+		return MediateResult{Send: result.Action != "clarify", Text: result.Text}, nil
+
 	case "game-master":
-		prompt = fmt.Sprintf(
+		prompt := fmt.Sprintf(
 			"You are a creative game master. Add a brief narrative flourish to accompany this message. Output the original message followed by a GM note in italics (using *asterisks*), nothing else.\n\nMessage: %s",
 			msg)
-	default:
-		return msg, nil
-	}
+		text, err := callClaudeModel(apiKey, model, prompt)
+		if err != nil {
+			return passthrough, err
+		}
+		return MediateResult{Send: true, Text: text}, nil
 
-	return callClaudeModel(apiKey, model, prompt)
+	default:
+		return passthrough, nil
+	}
 }

@@ -446,7 +446,9 @@ func (m *tuiModel) sendMsg(text string) tea.Cmd {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 
-			type mediateResult struct{ text string }
+			type mediateResult struct {
+				result claude.MediateResult
+			}
 			type contextResult struct{ blocks []transport.ContextBlock }
 
 			mediateCh := make(chan mediateResult, 1)
@@ -454,14 +456,14 @@ func (m *tuiModel) sendMsg(text string) tea.Cmd {
 
 			if mode != "relay" {
 				go func() {
-					if rewritten, err := claude.Mediate(apiKey, model, mode, text); err == nil && rewritten != "" {
-						mediateCh <- mediateResult{rewritten}
-					} else {
-						mediateCh <- mediateResult{text}
+					r, err := claude.Mediate(apiKey, model, mode, text)
+					if err != nil {
+						r = claude.MediateResult{Send: true, Text: text}
 					}
+					mediateCh <- mediateResult{r}
 				}()
 			} else {
-				mediateCh <- mediateResult{text}
+				mediateCh <- mediateResult{claude.MediateResult{Send: true, Text: text}}
 			}
 
 			go func() {
@@ -472,11 +474,19 @@ func (m *tuiModel) sendMsg(text string) tea.Cmd {
 				}
 			}()
 
+			var mediateR claude.MediateResult
 			select {
 			case r := <-mediateCh:
-				finalText = r.text
+				mediateR = r.result
 			case <-ctx.Done():
+				mediateR = claude.MediateResult{Send: true, Text: text}
 			}
+
+			// If Claude wants clarification, surface the questions locally and abort send.
+			if !mediateR.Send {
+				return claudeResponseMsg{query: text, response: mediateR.Text}
+			}
+			finalText = mediateR.Text
 
 			select {
 			case r := <-contextCh:
