@@ -117,27 +117,30 @@ type claudeResponseMsg struct {
 // ─── model ───────────────────────────────────────────────────────────────────
 
 type tuiModel struct {
-	messages      []chatMsg
-	compose       textarea.Model
-	otp           string
-	handle        string
-	mode          string
-	client        *transport.Client
-	incoming      chan transport.Envelope
-	cfg           state.Config
-	cwd           string
-	width         int
-	height        int
-	showWaiting   bool
-	sentFiles     map[string]bool // files sent as context this session
-	focusArea     int             // 0=compose, 1=sidebar tree, 2=claude panel
-	sidebarCursor int
-	expanded      map[string]bool // which dirs are expanded
-	loginOverlay  bool            // true = show masked key input overlay
-	loginInput    textinput.Model
+	messages        []chatMsg
+	compose         textarea.Model
+	otp             string
+	handle          string
+	mode            string
+	client          *transport.Client
+	incoming        chan transport.Envelope
+	cfg             state.Config
+	cwd             string
+	width           int
+	height          int
+	showWaiting     bool
+	sentFiles       map[string]bool  // files sent as context this session
+	focusArea       int              // 0=compose, 1=sidebar tree, 2=mode, 3=claude
+	sidebarCursor   int
+	expanded        map[string]bool  // which dirs are expanded
+	loginOverlay    bool             // true = show masked key input overlay
+	loginInput      textinput.Model
+	participants    map[string]bool  // currently connected handles
+	maxParticipants int              // 0 = unlimited
+	isCreator       bool             // creator enforces capacity
 }
 
-func initialModel(otp, handle, mode string, client *transport.Client, incoming chan transport.Envelope, cfg state.Config, cwd string, showWaiting bool) tuiModel {
+func initialModel(otp, handle, mode string, maxParticipants int, isCreator bool, client *transport.Client, incoming chan transport.Envelope, cfg state.Config, cwd string) tuiModel {
 	ta := textarea.New()
 	ta.Placeholder = "write something... (" + sendKey() + " to send, /help for commands)"
 	ta.Focus()
@@ -169,20 +172,23 @@ func initialModel(otp, handle, mode string, client *transport.Client, incoming c
 	}
 
 	return tuiModel{
-		compose:     ta,
-		showWaiting: showWaiting,
-		otp:         otp,
-		handle:      handle,
-		mode:        mode,
-		client:      client,
-		incoming:    incoming,
-		cfg:         cfg,
-		cwd:         cwd,
-		width:       80,
-		height:      24,
-		sentFiles:   make(map[string]bool),
-		expanded:    make(map[string]bool),
-		loginInput:  li,
+		compose:         ta,
+		showWaiting:     isCreator, // creator waits; joiner doesn't
+		otp:             otp,
+		handle:          handle,
+		mode:            mode,
+		client:          client,
+		incoming:        incoming,
+		cfg:             cfg,
+		cwd:             cwd,
+		width:           80,
+		height:          24,
+		sentFiles:       make(map[string]bool),
+		expanded:        make(map[string]bool),
+		loginInput:      li,
+		participants:    make(map[string]bool),
+		maxParticipants: maxParticipants,
+		isCreator:       isCreator,
 	}
 }
 
@@ -358,10 +364,31 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		env := msg.env
 		switch env.Type {
 		case "presence":
-			if env.Text == "joined" {
+			switch env.Text {
+			case "joined":
 				m.showWaiting = false
+				m.participants[env.Sender] = true
+				// Creator enforces capacity.
+				if m.isCreator && m.maxParticipants > 0 && len(m.participants) > m.maxParticipants-1 {
+					m.client.Publish(context.Background(), transport.Envelope{ //nolint:errcheck
+						Type: "control",
+						Text: "room_full",
+					})
+					m.addSystem(fmt.Sprintf("%s was turned away — room is full (%d)", env.Sender, m.maxParticipants))
+				} else {
+					m.addSystem(fmt.Sprintf("%s joined", env.Sender))
+				}
+			case "left":
+				delete(m.participants, env.Sender)
+				m.addSystem(fmt.Sprintf("%s left", env.Sender))
+			default:
+				m.addSystem(fmt.Sprintf("%s %s", env.Sender, env.Text))
 			}
-			m.addSystem(fmt.Sprintf("%s %s", env.Sender, env.Text))
+		case "control":
+			if env.Text == "room_full" {
+				m.addSystem("room is full — disconnecting")
+				return m, tea.Quit
+			}
 		default:
 			m.messages = append(m.messages, chatMsg{
 				ts:     time.UnixMilli(env.Timestamp),
@@ -731,20 +758,53 @@ func (m tuiModel) renderModePanel(width int) []string {
 	return append([]string{styleSidebarHeader.Render(" mode")}, append(rows, hint)...)
 }
 
+// participantPanelHeight returns the number of lines renderParticipants will produce.
+func (m tuiModel) participantPanelHeight() int {
+	n := len(m.participants) + 1 // header + one per participant
+	if n < 2 {
+		n = 2 // header + "(waiting...)"
+	}
+	return n
+}
+
+// renderParticipants renders the live participant list.
+func (m tuiModel) renderParticipants(width int) []string {
+	inner := width - 1
+	capLabel := ""
+	if m.maxParticipants > 0 {
+		capLabel = fmt.Sprintf(" (%d max)", m.maxParticipants)
+	}
+	lines := []string{styleSidebarHeader.Render(" who's here" + capLabel)}
+
+	if len(m.participants) == 0 {
+		lines = append(lines, styleSidebarHint.Render("  waiting..."))
+		return lines
+	}
+	for handle := range m.participants {
+		label := "  ● " + handle
+		if lipgloss.Width(label) > inner {
+			label = label[:inner]
+		}
+		lines = append(lines, lipgloss.NewStyle().Foreground(colPink).Render(label))
+	}
+	return lines
+}
+
 // renderSidebar returns lines for the context sidebar (width = sidebarW).
 func (m tuiModel) renderSidebar(totalRows int) []string {
 	inner := sidebarW - 1
 	sep := styleDivider.Render(" " + strings.Repeat("─", inner-1))
 
-	// Mode panel (2 lines) at top, then sep (1), then context title (1), then sep (1),
-	// then tree, then claude panel (8) at bottom.
-	// Fixed lines: mode(5) + sep(1) + context(1) + sep(1) + claude(8) = 16.
+	// mode(5) + sep(1) + participants(N) + sep(1) + context(1) + sep(1) + claude(8)
 	modePanelLines := m.renderModePanel(sidebarW)
 	lines := append(modePanelLines, sep)
+	lines = append(lines, m.renderParticipants(sidebarW)...)
+	lines = append(lines, sep)
 	lines = append(lines, styleSidebarHeader.Render(" context"))
 	lines = append(lines, sep)
 
-	treeRows := totalRows - 16
+	fixedLines := 5 + 1 + m.participantPanelHeight() + 1 + 1 + 1 + 8
+	treeRows := totalRows - fixedLines
 	if treeRows < 0 {
 		treeRows = 0
 	}

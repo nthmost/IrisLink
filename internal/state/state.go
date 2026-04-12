@@ -143,9 +143,10 @@ func containsColon(s string) bool {
 
 // Meta represents ~/.irislink/rooms/<otp>.meta
 type Meta struct {
-	Handle string `json:"handle"`
-	Mode   string `json:"mode"`
-	Cursor int64  `json:"cursor"`
+	Handle          string `json:"handle"`
+	Mode            string `json:"mode"`
+	Cursor          int64  `json:"cursor"`
+	MaxParticipants int    `json:"max_participants"` // 0 = unlimited, default 2
 }
 
 func WriteMeta(otp string, m Meta) error {
@@ -160,7 +161,7 @@ func WriteMeta(otp string, m Meta) error {
 }
 
 func ReadMeta(otp string) Meta {
-	m := Meta{Handle: "operator", Mode: "relay", Cursor: 0}
+	m := Meta{Handle: "operator", Mode: "relay", Cursor: 0, MaxParticipants: 2}
 	data, err := os.ReadFile(filepath.Join(roomsDir(), otp+".meta"))
 	if err != nil {
 		return m

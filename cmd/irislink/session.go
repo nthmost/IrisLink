@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,15 +16,22 @@ import (
 	"github.com/nthmost/IrisLink/internal/transport"
 )
 
-// runCreate: irislink create <handle> [mode]
+// runCreate: irislink create <handle> [mode] [max]
+// max: maximum participants (default 2, 0 = unlimited)
 func runCreate() {
 	handle := "operator"
 	mode := "relay"
+	maxP := 2
 	if len(os.Args) >= 3 {
 		handle = os.Args[2]
 	}
 	if len(os.Args) >= 4 {
 		mode = os.Args[3]
+	}
+	if len(os.Args) >= 5 {
+		if n, err := strconv.Atoi(os.Args[4]); err == nil {
+			maxP = n
+		}
 	}
 
 	otp, err := ilcrypto.GenerateOTP()
@@ -38,7 +46,7 @@ func runCreate() {
 	if err := state.WritePending(otp, roomID); err != nil {
 		fatal(err)
 	}
-	if err := state.WriteMeta(otp, state.Meta{Handle: handle, Mode: mode}); err != nil {
+	if err := state.WriteMeta(otp, state.Meta{Handle: handle, Mode: mode, MaxParticipants: maxP}); err != nil {
 		fatal(err)
 	}
 
@@ -65,7 +73,7 @@ func runCreate() {
 	}
 	fmt.Println()
 
-	runTUIWithClient(otp, handle, mode, client, incoming, cfg, true)
+	runTUIWithClient(otp, handle, mode, maxP, true, client, incoming, cfg)
 
 	client.Disconnect(context.Background())
 	state.ClearPending()
@@ -117,7 +125,7 @@ func runJoin() {
 		fatal(err)
 	}
 
-	runTUIWithClient(otp, handle, mode, client, incoming, cfg, false)
+	runTUIWithClient(otp, handle, mode, 0, false, client, incoming, cfg)
 
 	client.Disconnect(context.Background())
 	state.ClearPending()
@@ -155,13 +163,13 @@ func runLeave() {
 }
 
 // runTUIWithClient launches the bubbletea TUI with an already-connected client.
-// showWaiting opens a popover asking the user to share their OTP.
-func runTUIWithClient(otp, handle, mode string, client *transport.Client, incoming chan transport.Envelope, cfg state.Config, showWaiting bool) {
+// maxParticipants=0 means unlimited. isCreator=true means this side enforces the cap.
+func runTUIWithClient(otp, handle, mode string, maxParticipants int, isCreator bool, client *transport.Client, incoming chan transport.Envelope, cfg state.Config) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "."
 	}
-	m := initialModel(otp, handle, mode, client, incoming, cfg, cwd, showWaiting)
+	m := initialModel(otp, handle, mode, maxParticipants, isCreator, client, incoming, cfg, cwd)
 	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
